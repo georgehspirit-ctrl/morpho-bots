@@ -128,8 +128,8 @@ spec:
       {{- end }}
       {{- if .Values.volumePermissions.enabled }}
       initContainers:
-        # Mirrors the image's railway-entrypoint.sh chown without changing state-file modes.
-        # The runtime container itself never runs as root. Root plus CHOWN/DAC_OVERRIDE (to
+        # Changes volume ownership without changing state-file modes. The runtime container itself
+        # never runs as root. Root plus CHOWN/DAC_OVERRIDE (to
         # change ownership and traverse 0700 state directories) is the minimum this needs, so
         # the default chart fits the Baseline Pod Security Standard, not Restricted — see the
         # chart README for the Restricted-compatible pre-owned-volume path.

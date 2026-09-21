@@ -1,6 +1,6 @@
 import type { Logger } from '@repo/bot-kit'
 
-import { classifyShippingConfig, createLogger, railwayContext } from '@repo/bot-kit'
+import { classifyShippingConfig, createLogger } from '@repo/bot-kit'
 
 import { MONITORING_SCHEMA_VERSION } from '../../application/monitoring/monitoring-event'
 
@@ -25,8 +25,7 @@ export const createMonitoringLogger = (options: {
     context: {
       bot: options.bot,
       chainId: options.chainId,
-      schemaVersion: MONITORING_SCHEMA_VERSION,
-      ...railwayContext(env)
+      schemaVersion: MONITORING_SCHEMA_VERSION
     }
   })
 }

@@ -44,10 +44,9 @@ serviceAccount:
   name: ''
   annotations: {}
 
-# Entrypoint for the bot process. The chart deliberately bypasses the image's
-# railway-entrypoint.sh (which requires starting as root to chown the Railway volume) and runs
-# the bundle directly as the image's unprivileged `node` user; the init container below handles
-# volume ownership without changing the strict modes of restored state files.
+# Entrypoint for the bot process. The chart runs the bundle as the image's unprivileged `node` user;
+# the init container below handles volume ownership without changing the strict modes of restored
+# state files.
 command:
   - node
   - /repo/bots/quoter-bot/dist/src/index.js
@@ -178,8 +177,8 @@ persistence:
   # reinstall under the same release name and namespace re-adopts it.
   retain: true
 
-# Root init container that chowns the state volume to the runtime user, mirroring the image's
-# railway-entrypoint.sh. This is deliberately chown-only: Kubernetes fsGroup handling can add
+# Root init container that chowns the state volume to the runtime user. This is deliberately
+# chown-only: Kubernetes fsGroup handling can add
 # group permission bits to restored state files, which the bot correctly rejects as insecure.
 volumePermissions:
   enabled: true

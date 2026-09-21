@@ -5,7 +5,7 @@ import type { Address, Hex } from 'viem'
  * @remarks Bump on any breaking field rename or removal so a consumer can pin. Adding an optional
  * field is not breaking.
  */
-export const MONITORING_SCHEMA_VERSION = 1
+export const MONITORING_SCHEMA_VERSION = 2
 
 /** Workflow that produced one monitoring record. */
 export type MonitoringWorkflow = 'setup-check' | 'bootstrap' | 'ladder'

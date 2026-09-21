@@ -286,77 +286,31 @@ pnpm --filter @morpho-org/quoter-bot run start -- --version
 ## Deploy
 
 The package owns its production [Dockerfile](./Dockerfile), local
-[docker-compose.yml](./docker-compose.yml), Kubernetes [Helm chart](./helm/quoter-bot), and
-idempotent [`scripts/deploy-railway.ts`](./scripts/deploy-railway.ts) entrypoint. The Docker build
-context is the repository root so pnpm can resolve every workspace dependency; a build stage
-compiles the workspace, and the runtime stage ships only this bot's self-contained bundle — no
-other bot's code, workspace source, or package manager — and starts the combined setup, bootstrap,
-and ladder monitor as an unprivileged Node process. Kubernetes operators should deploy the
-published Docker Hub image through the package-owned Helm chart — see
-[Kubernetes (Helm)](#kubernetes-helm).
+[docker-compose.yml](./docker-compose.yml), and Kubernetes [Helm chart](./helm/quoter-bot). The
+Docker build context is the repository root so pnpm can resolve every workspace dependency; a build
+stage compiles the workspace, and the runtime stage ships only this bot's self-contained bundle —
+no other bot's code, workspace source, or package manager. The image runs the combined setup,
+bootstrap, and ladder monitor directly as the unprivileged `node` user.
 
-Each supported chain runs as its own Railway service, `quoter-bot-<chainId>` (`quoter-bot-1`,
-`quoter-bot-8453`), inside one project. A full deployment provisions the single chain named by
-`CHAIN_ID`: it creates that chain's service, selects the package Dockerfile, provisions a persistent
-volume at `/state`, and writes the effective environment configuration through stdin so values never
-appear in process arguments or logs. Every input keeps its unsuffixed runtime name, so run it once
-per chain with that chain's environment:
-
-```sh
-RAILWAY_PROJECT_ID=... CHAIN_ID=1 \
-pnpm --filter @morpho-org/quoter-bot run deploy:railway
-```
-
-Provide the required values from [`.env.example`](./.env.example) in the invoking environment.
-A full provisioning run supports only `private-key`, because the script cannot safely seed a local
-keystore file or an AWS credential source into a newly created service. For `keystore`, first
-provision the encrypted file at `KEYSTORE_PATH` in the existing service. For `aws`, first provision
-an AWS SDK credential source with direct `kms:GetPublicKey` and `kms:Sign` access in the existing
-service. Then set the corresponding
-signer variables out of band and use `DEPLOY_ONLY=true`; deploy-only does not inspect or mutate those
-credentials or files. Full provisioning fails closed for these modes instead of launching a service
-that cannot resolve its signer.
-
-`BOOTSTRAP_MARKETS` and `LADDER_MARKETS` must each be populated JSON arrays so a full run cannot
-replace a working strategy with an empty list. Every remaining optional value is synchronized:
-omitted timeouts return to their documented defaults, and omitted group IDs and BetterStack settings
-are disabled. `RAILWAY_ENVIRONMENT` defaults to `production`. CI uses `DEPLOY_ONLY=true` with the
-`quoter-bot-production` GitHub Environment, so it reads only `RAILWAY_PROJECT_ID` and
-`RAILWAY_TOKEN` and uses project-token deployment permissions to re-ship every supported chain's
-pre-provisioned service. Deploy-only cannot create a service: it fails before any upload, naming the
-chain services a full run has not yet provisioned. It starts every service before waiting on any, so
-one chain's failure never blocks another's re-ship, and it fails when any service does not reach
-`SUCCESS`. Deploy-only does not inspect or mutate Railway variables, volumes, or secrets. Before
-deploy-only, an authorized operator or full provisioning run must configure, on each chain's service,
-`RAILWAY_RUN_UID=0`, the current `RAILWAY_DOCKERFILE_PATH=bots/quoter-bot/Dockerfile`,
-`XDG_STATE_HOME=/state`, signer and application variables, and the state volume. A full
-provisioning run preserves root-level ownership files in an attached volume at `/state`; when none
-is attached, it creates a fresh volume there and leaves any detached pre-rename volume untouched. A project token (`RAILWAY_TOKEN`) cannot
-manage that configuration; use authorized account or workspace credentials only for provisioning,
-not routine deploy-only CI.
-
-The local Compose service uses the same `/state` ownership path through a named volume, requires both
-strategy arrays, and supplies the runtime timeout defaults when the corresponding host variables are
-absent.
-
-Both modes start a detached upload, read the deployment ID Railway reports for it, and poll that
-deployment to a terminal state. A GitHub release is created only after Railway reports `SUCCESS`;
-failed, crashed, approval-blocked, removed, skipped, sleeping, unknown, or timed-out deployments
-fail the workflow.
+Infrastructure operators own scheduling, secrets, and persistent state. Run one instance per chain,
+provide the required values from [`.env.example`](./.env.example) or a YAML configuration, and mount
+durable storage at `XDG_STATE_HOME`. The local Compose service demonstrates the environment-based
+configuration and a persistent `/state` volume. Kubernetes operators can use the package-owned Helm
+chart — see [Kubernetes (Helm)](#kubernetes-helm).
 
 A production release (a merged PR whose description says `Releases quoter-bot`, approved after that
-line was added) also publishes the image to Docker Hub as `morphoorg/quoter`, tagged with the release
-commit hash and `latest`. The push runs in the public `morpho-org/morpho-bots` repository, from the
-`quoter-bot-*` tag the release mirror creates there, and gates neither the deploy nor the GitHub
-release. The **Publish quoter-bot Docker Hub** workflow publishes only a tag whose commit is on
+line was added) creates a tag without deploying the bot, then publishes the image to Docker Hub as
+`morphoorg/quoter`, tagged with the release commit hash and `latest`. The push runs in the public
+`morpho-org/morpho-bots` repository from the `quoter-bot-*` tag the release mirror creates there.
+The **Publish quoter-bot Docker Hub** workflow publishes only a tag whose commit is on
 first-parent `main` and carries the mirror's `Source-Ref:` trailer, and authenticates through the
 Docker organization's OIDC connection scoped by the `quoter-bot-dockerhub` GitHub Environment
 (secret `DOCKERHUB_OIDC_CONNECTIONID`, vars `DOCKER_USERNAME` and `DOCKER_REPOSITORY`), so CI
 stores no static Docker Hub credential.
 
-Before each build, the workflow checks Docker's registry API and fails closed when the commit-SHA
-tag already exists or the registry returns an unexpected status. A rerun therefore cannot replace
-an image already associated with a release commit. `latest` only moves forward: when a
+Before each build, the workflow checks Docker's registry API, reuses an existing immutable
+commit-SHA tag on reruns, and fails closed on unexpected registry errors. `latest` only moves
+forward: when a
 `quoter-bot-*` release tag descends from the built commit, a rerun backfills that commit's image
 tag without touching `latest`.
 
@@ -423,7 +377,7 @@ The chart runs a one-replica StatefulSet because the bot is a singleton writer �
 pod is never created until the old one has fully terminated, across rollouts, manual deletion,
 and eviction alike. It mounts a persistent volume at `/state` for durable offer-group ownership
 state (kept on uninstall by default), runs the bundle directly as the image's unprivileged
-`node` user instead of the root-only Railway entrypoint, and sizes the termination grace period
+`node` user, and sizes the termination grace period
 (1020 seconds by default, automatically floored for a chart-managed configuration to one
 receipt timeout per serialized shutdown wait — three per bootstrap market, two per ladder
 market, one per ladder group, and two cleanup batches — plus a drain buffer) so shutdown
@@ -547,8 +501,8 @@ offers, ladder quotes/offers, decisions, and submitted/confirmed transactions ar
 log source. With the shipping variables unset no log record leaves the process; partial
 configuration fails loud locally and does not enable verbose diagnostics.
 
-Every record carries `bot: "quoter-bot"`, the configured `chainId`, and available Railway deployment
-context. `schemaVersion` is bound into the logger context of every record (currently `1`), so a
+Every record carries `bot: "quoter-bot"` and the configured `chainId`. `schemaVersion` is bound into
+the logger context of every record (currently `2`), so a
 consumer can pin the contract; it is bumped only on a breaking field rename or removal. Nested
 `status: "failed"`, `status: "halted"`, and `errorName` values are emitted at error level.
 Unexpected failures include only a sanitized `errorName`; private keys, RPC/API credentials, signed

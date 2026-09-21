@@ -33,21 +33,16 @@ RUN pnpm -r --if-present run build
 # Runtime stage. dist/src/index.js is a self-contained esbuild bundle (scripts/build.ts,
 # bundle: true), so no node_modules ships; the bot's package.json rides along only so node treats
 # the bundle's .js as ESM ("type": "module"). Files stay root-owned and read-only to the runtime
-# user. Install util-linux explicitly so the runtime always provides setpriv.
+# user.
 FROM node:24.14.1-slim
 ENV HOME=/home/node
+ENV XDG_STATE_HOME=/state
 
-RUN /usr/bin/apt-get update \
-  && /usr/bin/apt-get install -y --no-install-recommends util-linux \
-  && /usr/bin/rm -rf /var/lib/apt/lists/*
-RUN /usr/bin/mkdir -p /state
+RUN /usr/bin/mkdir -p /state && /usr/bin/chown node:node /state
 
 COPY --from=build --chown=0:0 --chmod=0555 /repo/bots/quoter-bot/package.json /repo/bots/quoter-bot/package.json
 COPY --from=build --chown=0:0 --chmod=0555 /repo/bots/quoter-bot/dist /repo/bots/quoter-bot/dist
 
-# Railway must start the container as root so the entrypoint can repair its root-owned mount. The
-# entrypoint stays root only long enough to chown the volume, then setpriv atomically execs the bot
-# without root identities or capabilities — runtime configuration may include a funded maker key.
-COPY --chown=0:0 --chmod=0555 bots/quoter-bot/scripts/railway-entrypoint.sh /usr/local/sbin/railway-entrypoint.sh
 WORKDIR /repo/bots/quoter-bot
-CMD ["/usr/local/sbin/railway-entrypoint.sh", "start", "--verbose"]
+USER node
+CMD ["node", "dist/src/index.js", "start", "--verbose"]
