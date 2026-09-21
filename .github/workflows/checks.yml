@@ -1,0 +1,86 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize]
+
+env:
+  CI: true
+
+jobs:
+  Lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Run lint
+        run: pnpm lint
+
+      - name: Run format check
+        run: pnpm format:check
+
+  Typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Run typecheck
+        run: pnpm -r run typecheck
+
+  Test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Install Foundry (includes anvil)
+        # anvil 1.4.4 rejects same-nonce EIP-1559 replacements ("nonce lower than current"), which
+        # breaks the pending-queue bump/replace fork test (real nodes + anvil >=1.5 accept them).
+        # The pinned release archive is downloaded directly because the foundry-toolchain action
+        # shells the live foundryup installer, which upstream replaced with a native binary on
+        # 2026-08-25 and broke every `bash foundryup` invocation until the action catches up.
+        # The SHA-256 pins the exact reviewed artifact (release tags are mutable), matching
+        # https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_amd64.attestation.txt;
+        # binaries are extracted without sudo into an ephemeral PATH entry.
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/foundry.tar.gz"
+          echo "73640b01bd9ed29fdb4965085099371f8cf0dbbec3e2086cf54564efc4dcfe88  $RUNNER_TEMP/foundry.tar.gz" \
+            | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/foundry-bin"
+          tar -xzf "$RUNNER_TEMP/foundry.tar.gz" -C "$RUNNER_TEMP/foundry-bin"
+          echo "$RUNNER_TEMP/foundry-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/foundry-bin/forge" --version
+          "$RUNNER_TEMP/foundry-bin/anvil" --version
+
+      - name: Run contract tests
+        run: forge test --root packages/contracts -vv
+
+      - name: Run unit tests
+        # The fork and e2e suites fork Base at a pinned block and fail loud without an archive
+        # RPC_URL_8453; this repository holds no such secret, so they are excluded here and run only
+        # in the source repository's CI. Patterns are matched relative to each vitest project root.
+        run: |
+          pnpm exec vitest run --exclude '**/test/fork/**' --exclude '**/test/e2e/**'
+          pnpm --filter @morpho-org/quoter-bot run playground:test
+
+      - name: Run browser smoke tests
+        run: pnpm --filter @morpho-org/quoter-bot run playground:smoke:test
+
+  Dead-Code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Check for unused code and dependencies
+        run: pnpm knip

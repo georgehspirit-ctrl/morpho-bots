@@ -1,0 +1,37 @@
+{
+  "name": "@morpho-org/midnight-liquidation",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsx scripts/build.ts",
+    "deploy:railway": "tsx scripts/deploy-railway.ts",
+    "prestart": "pnpm --filter \"{.}...\" --if-present run build",
+    "seed:positions": "pnpm --filter \"{.}...\" --if-present run build && node --env-file-if-exists=.env dist/scripts/seed-liquidatable-positions.js",
+    "seed:loan-collateral": "pnpm --filter \"{.}...\" --if-present run build && node --env-file-if-exists=.env dist/scripts/seed-loan-collateral-position.js",
+    "start": "node --env-file-if-exists=.env dist/src/index.js",
+    "typecheck": "soltag && tsc --noEmit"
+  },
+  "dependencies": {
+    "@repo/bot-kit": "workspace:*",
+    "@repo/contracts": "workspace:*",
+    "@repo/swaps": "workspace:*",
+    "@repo/utils": "workspace:*",
+    "executooor-viem": "catalog:",
+    "openapi-fetch": "catalog:",
+    "solc": "catalog:",
+    "soltag": "catalog:",
+    "viem": "catalog:"
+  },
+  "devDependencies": {
+    "@repo/typescript-config": "workspace:*",
+    "@types/node": "catalog:",
+    "esbuild": "catalog:",
+    "execa": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

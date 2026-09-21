@@ -1,0 +1,50 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "exclude": ["enumMembers", "classMembers"],
+  "ignore": [".claude/**"],
+  "ignoreBinaries": ["forge", "mkfifo", "railway"],
+  "workspaces": {
+    ".": {
+      "ignoreDependencies": ["tsx"]
+    },
+    "packages/typescript-config": {},
+    "packages/utils": {},
+    "packages/contracts": {},
+    "packages/bot-kit": {},
+    "packages/ci-scripts": {
+      "entry": [
+        "src/release-intent/orchestrate/*.ts",
+        "src/pr-size/orchestrate/*.ts",
+        "src/public-mirror/orchestrate/*.ts"
+      ]
+    },
+    "packages/logging": {},
+    "packages/monitoring": {},
+    "packages/observability": {},
+    "packages/offers": {},
+    "packages/swaps": {},
+    "bots/midnight-liquidation": {
+      "ignore": ["src/generated/**"],
+      "entry": [
+        "src/index.ts",
+        "scripts/seed-liquidatable-positions.ts",
+        "scripts/seed-loan-collateral-position.ts"
+      ]
+    },
+    "bots/blue-liquidation": {
+      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"]
+    },
+    "bots/vault-v1-reallocation": {
+      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"]
+    },
+    "bots/vault-v2-reallocation": {
+      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"]
+    },
+    "bots/midnight-crossed-books": {
+      "ignore": ["src/infrastructure/*/generated/**"]
+    },
+    "bots/quoter-bot": {
+      "entry": ["src/index.ts", "playground/app.tsx"]
+    }
+  }
+}

@@ -1,0 +1,59 @@
+# Runs the per-chain blue-liquidation bots. Borrower candidates come from the Morpho GraphQL API
+# (MORPHO_API_URL, public by default), so there is no indexer or database to run. The bots' build
+# context is the repo root so the pnpm workspace (packages/*) resolves — see Dockerfile. Set the
+# chainId-suffixed RPCs (RPC_URL_8453, RPC_URL_4663) and a LIQUIDATOR_PRIVATE_KEY.
+services:
+  bot-base:
+    build:
+      context: ../..
+      dockerfile: bots/blue-liquidation/Dockerfile
+    environment:
+      CHAIN_ID: '8453'
+      RPC_URL: ${RPC_URL_8453:?set RPC_URL_8453}
+      LIQUIDATOR_PRIVATE_KEY: ${LIQUIDATOR_PRIVATE_KEY:?set LIQUIDATOR_PRIVATE_KEY}
+      EXECUTOOOR_ADDRESS: ${EXECUTOOOR_ADDRESS:-}
+      # Venues are enabled by the presence of their API key (or ENABLE_LIFI=true — LiFi works
+      # keyless). With none set, the bot refuses to start unless ALLOW_DETECTION_ONLY=true.
+      ZEROX_API_KEY: ${ZEROX_API_KEY:-}
+      ONEINCH_API_KEY: ${ONEINCH_API_KEY:-}
+      LIFI_API_KEY: ${LIFI_API_KEY:-}
+      ENABLE_LIFI: ${ENABLE_LIFI:-}
+      ALLOW_DETECTION_ONLY: ${ALLOW_DETECTION_ONLY:-}
+      MORPHO_API_URL: ${MORPHO_API_URL:-}
+      HEALTH_FACTOR_LTE: ${HEALTH_FACTOR_LTE:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Optional BetterStack log shipping (in-process loglayer transport). Empty = disabled; the bot
+      # ships its structured logs only when BOTH are set (host also required), else behaves as before.
+      BETTERSTACK_SOURCE_TOKEN: ${BETTERSTACK_SOURCE_TOKEN:-}
+      BETTERSTACK_INGESTING_HOST: ${BETTERSTACK_INGESTING_HOST:-}
+      BETTERSTACK_HEARTBEAT_URL: ${BETTERSTACK_HEARTBEAT_URL_8453:-}
+    restart: unless-stopped
+
+  # Robinhood launches DETECTION-ONLY by default (ALLOW_DETECTION_ONLY_4663 defaults true, no venue
+  # keys): the bot discovers + logs liquidatable positions but skips every routed liquidation. Its
+  # venue inputs are chainId-suffixed (ZEROX_API_KEY_4663 etc.) so arming Base never silently arms
+  # Robinhood — set those AND drop the opt-in once it is expected to route. It still needs the
+  # Executor deployed on Robinhood (deploy:executor) to pass the startup liveness gate.
+  bot-robinhood:
+    build:
+      context: ../..
+      dockerfile: bots/blue-liquidation/Dockerfile
+    environment:
+      CHAIN_ID: '4663'
+      RPC_URL: ${RPC_URL_4663:-https://rpc.mainnet.chain.robinhood.com}
+      LIQUIDATOR_PRIVATE_KEY: ${LIQUIDATOR_PRIVATE_KEY:?set LIQUIDATOR_PRIVATE_KEY}
+      EXECUTOOOR_ADDRESS: ${EXECUTOOOR_ADDRESS:-}
+      ZEROX_API_KEY: ${ZEROX_API_KEY_4663:-}
+      ONEINCH_API_KEY: ${ONEINCH_API_KEY_4663:-}
+      LIFI_API_KEY: ${LIFI_API_KEY_4663:-}
+      ENABLE_LIFI: ${ENABLE_LIFI_4663:-}
+      ALLOW_DETECTION_ONLY: ${ALLOW_DETECTION_ONLY_4663:-true}
+      MORPHO_API_URL: ${MORPHO_API_URL:-}
+      HEALTH_FACTOR_LTE: ${HEALTH_FACTOR_LTE:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Optional BetterStack log shipping (in-process loglayer transport). Empty = disabled; both blue
+      # chains share the one blue source, discriminated by the bot/chainId fields the logger stamps.
+      BETTERSTACK_SOURCE_TOKEN: ${BETTERSTACK_SOURCE_TOKEN:-}
+      BETTERSTACK_INGESTING_HOST: ${BETTERSTACK_INGESTING_HOST:-}
+      BETTERSTACK_HEARTBEAT_URL: ${BETTERSTACK_HEARTBEAT_URL_4663:-}
+    restart: unless-stopped

@@ -1,0 +1,32 @@
+{
+  "name": "@morpho-org/midnight-crossed-books",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run generate:api && tsx scripts/build.ts",
+    "deploy:railway": "tsx scripts/deploy-railway.ts",
+    "generate:api": "openapi-typescript morpho-api.json -o src/infrastructure/morpho-api/generated/morpho-api.types.ts && openapi-typescript router-api.json -o src/infrastructure/router-api/generated/router-api.types.ts",
+    "prestart": "pnpm --filter \"{.}...\" --if-present run build",
+    "start": "node --env-file-if-exists=.env dist/src/index.js",
+    "typecheck": "pnpm run generate:api && tsc --noEmit"
+  },
+  "dependencies": {
+    "@repo/bot-kit": "workspace:*",
+    "@repo/contracts": "workspace:*",
+    "@repo/utils": "workspace:*",
+    "openapi-fetch": "catalog:",
+    "viem": "catalog:"
+  },
+  "devDependencies": {
+    "@repo/typescript-config": "workspace:*",
+    "@types/node": "catalog:",
+    "esbuild": "catalog:",
+    "execa": "catalog:",
+    "openapi-typescript": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

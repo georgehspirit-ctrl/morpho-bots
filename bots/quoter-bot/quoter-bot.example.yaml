@@ -1,0 +1,133 @@
+# Copy to quoter-bot.yaml (preferred) or quoter-bot.yml.
+# Never commit the real file. Prefer environment variables for secrets and chmod 600 the file.
+chain:
+  # Supported: 1 (Ethereum mainnet) or 8453 (Base). RPC endpoints must match this id.
+  id: 8453
+  rpcUrl: 'https://base-rpc.example'
+  # Required by commands whose active targetRate strategy is variable_rate_avg.
+  archiveRpcUrl: 'https://base-archive-rpc.example'
+
+identity:
+  makerAddress: '0x1111111111111111111111111111111111111111'
+  # Configure exactly one signer. This legacy private-key example remains backward compatible.
+  keyStorageMethod: 'private-key'
+  makerPrivateKey: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  # Keystore alternatives remain blank while private-key is selected. Prefer KEYSTORE_PASSWORD or
+  # --interactive over storing a real password here.
+  keystorePath: ''
+  keystorePassword: ''
+  keystoreInteractive: false
+  # AWS KMS alternatives remain blank while private-key is selected. AWS signer must differ from
+  # makerAddress and may use only the canonical Ecrecover ratifier.
+  awsKmsKeyId: ''
+  awsRegion: ''
+
+contracts:
+  midnightAddress: '0x2222222222222222222222222222222222222222'
+  loanAssetAddress: '0x3333333333333333333333333333333333333333'
+  ratifierAddress: '0x4444444444444444444444444444444444444444'
+
+apis:
+  morphoBaseUrl: 'https://api.example'
+
+markets:
+  allowlist:
+    - '0x5555555555555555555555555555555555555555555555555555555555555555'
+    - '0x6666666666666666666666666666666666666666666666666666666666666666'
+  # Required by commands whose active targetRate strategy is variable_rate_avg.
+  referenceMarketId: '0x7777777777777777777777777777777777777777777777777777777777777777'
+  # Window the reference market is averaged over. Defaults to three days; 3600-2592000 accepted.
+  # archiveRpcUrl must retain state for the whole window.
+  referenceLookbackSeconds: '259200'
+  v0OfferGroupIds:
+    - '0x8888888888888888888888888888888888888888888888888888888888888888'
+
+setup:
+  nativeReserveWei: '10000000000000000'
+  # Required only for AWS write mode.
+  signerNativeReserveWei: ''
+  # Decimal gwei. Calibrate the tip per chain: Base tips are nominal (~0.005), mainnet's are a
+  # real market (~1-2).
+  maxFeeGwei: 100
+  priorityFeeGwei: 0.01
+  maxTransactionSpendWei: '100000000000000000'
+  maxPublicationGas: 5000000
+  maxPublicationDataBytes: 65536
+  maxCancellationGas: 100000
+  maxBatchCancellationGas: 1000000
+  maxBatchCancellationDataBytes: 65536
+  # Required only for local or keystore Setter mode.
+  maxRatificationGas: ''
+  requestTimeoutMs: 10000
+  transactionReceiptTimeoutMs: 180000
+
+# Integer values use decimal notation only: no floats, exponents, plus signs, or internal whitespace.
+# Asset/credit/exposure amounts are exact raw loan-asset units. Rates are integer BPS.
+bootstrap:
+  - marketId: '0x5555555555555555555555555555555555555555555555555555555555555555'
+    targetRate:
+      strategy: 'hardcoded'
+      hardcodedRateBps: '400'
+    creditTarget: '10000000000'
+    acceptanceAssets: '100000000'
+    offerSize: '500000000'
+    premiumBps: -50
+    maximumMarketExposure: '20000000000'
+    maximumTotalExposure: '30000000000'
+    minimumRateBps: 200
+    maximumRateBps: 800
+    autoRefill: false
+  - marketId: '0x6666666666666666666666666666666666666666666666666666666666666666'
+    targetRate:
+      strategy: 'variable_rate_avg'
+    creditTarget: '5000000000'
+    acceptanceAssets: '50000000'
+    offerSize: '250000000'
+    premiumBps: 0
+    # Optional term structure: quote = reference + premiumBps +
+    # min(floor(premiumPerYearBps * secondsToMaturity / 31536000), maximumPremiumBps).
+    # Omit maximumPremiumBps for an uncapped linear premium; omit the whole block to
+    # keep the static premium only.
+    maturityPremium:
+      shape: 'linear'
+      premiumPerYearBps: '120'
+      maximumPremiumBps: '300'
+    maximumMarketExposure: '10000000000'
+    maximumTotalExposure: '30000000000'
+    minimumRateBps: 200
+    maximumRateBps: 800
+    autoRefill: true
+
+# C = reference + quotePremiumBps + resolved maturityPremium. Rung k (zero-based) is
+# C-spread/2-k*step on the lower side and C+spread/2+k*step on the higher side.
+# Runtime rungs saturate at the hard bounds instead of failing. Only closest rungs
+# that each satisfy minimumOfferAssets are funded. Weight k is 10000+k*sizeSkewBps;
+# the outermost funded rung receives division remainder.
+ladder:
+  - marketId: '0x5555555555555555555555555555555555555555555555555555555555555555'
+    targetRate:
+      strategy: 'variable_rate_avg'
+    quotePremiumBps: '0'
+    # Optional term structure: the center gains
+    # min(floor(premiumPerYearBps * secondsToMaturity / 31536000), maximumPremiumBps).
+    # Omit maximumPremiumBps for an uncapped linear premium; omit the whole block to
+    # keep the static center only.
+    maturityPremium:
+      shape: 'linear'
+      premiumPerYearBps: '120'
+      maximumPremiumBps: '300'
+    spreadBps: '200'
+    stepBps: '100'
+    rungCount: '3'
+    sizeSkewBps: '0'
+    lowerRateBudgetAssets: '10000000000'
+    higherRateBudgetAssets: '10000000000'
+    targetMarketExposureAssets: '20000000000'
+    maximumTotalExposureAssets: '30000000000'
+    minimumOfferAssets: '101000000'
+    groupMode: 'shared-rung'
+    loopIntervalSeconds: '60'
+    bookCrossedCooldownSeconds: '180'
+    movementToleranceBps: '10'
+    minimumRateBps: '200'
+    maximumRateBps: '800'

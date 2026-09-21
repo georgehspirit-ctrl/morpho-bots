@@ -1,0 +1,26 @@
+name: Close pull requests
+
+# Pull requests are closed automatically; see CONTRIBUTING.md. `pull_request_target` runs in the
+# base repository's context so the token can comment and close on a fork's PR. The job checks
+# nothing out and runs no code from the PR, which is what keeps that context safe.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  Close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Comment and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_URL" --body "This repository isn't accepting pull requests at this time."
+          gh pr close "$PR_URL"

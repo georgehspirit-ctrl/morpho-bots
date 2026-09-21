@@ -1,0 +1,29 @@
+{
+  "singleQuote": true,
+  "arrowParens": "avoid",
+  "semi": false,
+  "printWidth": 100,
+  "trailingComma": "none",
+  "embeddedLanguageFormatting": "off",
+  "sortImports": {
+    "customGroups": [{ "groupName": "repo", "elementNamePattern": ["^@repo/.+"] }],
+    "groups": [
+      "type-import",
+      ["value-builtin", "value-external", "repo"],
+      "type-internal",
+      "value-internal",
+      ["type-parent", "type-sibling", "type-index"],
+      ["value-parent", "value-sibling", "value-index"],
+      "unknown"
+    ]
+  },
+  "ignorePatterns": [
+    "pnpm-lock.yaml",
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/generated/**",
+    "**/node_modules/**",
+    "**/helm/**/templates/**"
+  ]
+}

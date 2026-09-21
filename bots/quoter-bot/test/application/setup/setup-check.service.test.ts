@@ -1,0 +1,1314 @@
+import type { Hex } from 'viem'
+
+import { maxUint256 } from 'viem'
+import { describe, expect, test } from 'vitest'
+
+import { SafeProviderError } from '../../../src/application/setup/safe-provider.error'
+import {
+  SetupCheckService,
+  type SetupCheckConfig,
+  type SetupCheckReport,
+  type SetupStateService
+} from '../../../src/application/setup/setup-check.service'
+import { SetupFailedError } from '../../../src/application/setup/setup-failed.error'
+import { SetupMonitorConfigurationError } from '../../../src/application/setup/setup-monitor-configuration.error'
+import { SignerAccountError } from '../../../src/infrastructure/make/signer-account.error'
+import { ProviderReadError } from '../../../src/infrastructure/setup-state/provider-read.error'
+import { ProviderResponseError } from '../../../src/infrastructure/setup-state/provider-response.error'
+
+const maker = '0x1111111111111111111111111111111111111111'
+const midnight = '0x2222222222222222222222222222222222222222'
+const loanAsset = '0x3333333333333333333333333333333333333333'
+const ratifier = '0x4444444444444444444444444444444444444444'
+const delegatedSigner = '0x9999999999999999999999999999999999999999'
+const marketId: Hex = `0x${'55'.repeat(32)}`
+const secondMarketId: Hex = `0x${'66'.repeat(32)}`
+const referenceMarketId: Hex = `0x${'77'.repeat(32)}`
+
+const config: SetupCheckConfig = {
+  chainId: 8453,
+  maker,
+  signerMode: 'private-key',
+  midnight,
+  nativeReserve: 10n,
+  loanAsset,
+  ratifier,
+  marketIds: [marketId],
+  referenceMarketId
+}
+
+const readyState = (): SetupStateService => {
+  return {
+    getChainId: async () => 8453,
+    getReferenceChainId: async () => 8453,
+    getCode: async () => '0x1234',
+    getDerivedSigner: async () => maker,
+    getAuthorization: async () => true,
+    getTransactionCounts: async () => ({ latest: 0, pending: 0 }),
+    getNativeBalance: async () => 10n,
+    getLoanAllowance: async () => ({ spender: midnight, amount: maxUint256 }),
+    getRatifier: async () => ({
+      listed: true,
+      deployed: true,
+      midnightMatches: true,
+      surfaceMatches: true,
+      authorized: true
+    }),
+    getBook: async id => ({
+      id,
+      allowlisted: true,
+      active: true,
+      loanAsset,
+      tickSpacing: 1
+    }),
+    checkReference: async () => ({
+      marketId: referenceMarketId,
+      referenceReadable: true,
+      archiveReadable: true
+    }),
+    inspectOffers: async () => ({
+      unknownNamespaces: [],
+      unknownMarketIds: [],
+      invertedMarketIds: []
+    }),
+    checkPositionHealth: async () => ({ status: 'not-required', reason: 'V0 has no debt' })
+  }
+}
+
+describe('SetupCheckService', () => {
+  test('fails readiness when the archive provider serves a different chain', async () => {
+    // Regression: only the current-state reader's chain was checked. A stale Base
+    // REFERENCE_RPC_URL paired with CHAIN_ID=1 let the variable-rate strategy derive quotes from
+    // Base Blue state and submit them on mainnet whenever the reference market resolved on both.
+    // The current-state reader agrees with the configured chain, so the archive mismatch is the
+    // only thing that can fail this check.
+    const state = {
+      ...readyState(),
+      getChainId: async () => 1,
+      getReferenceChainId: async () => 8453
+    }
+    const report = await new SetupCheckService(state, { ...config, chainId: 1 }).check()
+    const chain = report.checks.find(check => check.name === 'chain')
+
+    expect(chain?.observed).toMatchObject({ configured: 1, connected: 1, referenceConnected: 8453 })
+    expect(chain?.status).toBe('failed')
+    expect(report.ready).toBe(false)
+  })
+
+  test('passes readiness when both providers serve the configured chain', async () => {
+    const state = { ...readyState(), getChainId: async () => 1, getReferenceChainId: async () => 1 }
+    const report = await new SetupCheckService(state, { ...config, chainId: 1 }).check()
+    const chain = report.checks.find(check => check.name === 'chain')
+
+    expect(chain?.status).toBe('passed')
+    expect(chain?.observed).toMatchObject({ configured: 1, connected: 1, referenceConnected: 1 })
+  })
+
+  test('halts monitoring after emitting the first failed readiness report', async () => {
+    const controller = new AbortController()
+    const reports: { ready: boolean; report: SetupCheckReport }[] = []
+    const state = readyState()
+    let nativeBalance = 10n
+    state.getNativeBalance = async () => nativeBalance
+    const service = new SetupCheckService(state, config)
+
+    const terminal = await service.runContinuously({
+      signal: controller.signal,
+      intervalMs: 1,
+      onCycle: report => {
+        reports.push({ ready: report.ready, report })
+        if (reports.length === 1) nativeBalance = 9n
+      }
+    })
+
+    expect(reports.map(report => report.ready)).toEqual([true, false])
+    expect(terminal).toMatchObject({ status: 'halted', reason: 'setup-failed', cycles: 2 })
+    const lastEmittedReport = reports.at(-1)
+    expect(lastEmittedReport).toBeDefined()
+    if (terminal.reason === 'setup-failed') {
+      expect(terminal.lastReport.ready).toBe(false)
+      if (lastEmittedReport) expect(terminal.lastReport).toBe(lastEmittedReport.report)
+    }
+  })
+
+  test('retries a transient provider-only report before emitting a recovered monitor cycle', async () => {
+    const controller = new AbortController()
+    const state = readyState()
+    let balanceReads = 0
+    state.getNativeBalance = async () => {
+      balanceReads += 1
+      if (balanceReads === 1) {
+        throw new SafeProviderError({
+          kind: 'provider-error',
+          provider: 'rpc',
+          name: 'TimeoutError',
+          code: 'REQUEST_TIMEOUT',
+          context: 'request'
+        })
+      }
+      return 10n
+    }
+    const reports: SetupCheckReport[] = []
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: controller.signal,
+      intervalMs: 1,
+      onCycle: report => {
+        reports.push(report)
+        controller.abort()
+      }
+    })
+
+    expect(balanceReads).toBe(2)
+    expect(reports.map(report => report.ready)).toEqual([true])
+    expect(terminal).toEqual({ status: 'stopped', reason: 'signal', cycles: 1 })
+  })
+
+  test('keeps monitoring while a transient provider outage spans consecutive cycles', async () => {
+    const controller = new AbortController()
+    const state = readyState()
+    state.getNativeBalance = async () => {
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'rpc',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+    const reports: SetupCheckReport[] = []
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: controller.signal,
+      intervalMs: 1,
+      onCycle: report => {
+        reports.push(report)
+        if (reports.length === 3) controller.abort()
+      }
+    })
+
+    expect(reports.map(report => report.ready)).toEqual([false, false, false])
+    expect(terminal).toEqual({ status: 'stopped', reason: 'signal', cycles: 3 })
+  })
+
+  test('halts once a transient provider outage outlasts the tolerated cycles', async () => {
+    const state = readyState()
+    state.getNativeBalance = async () => {
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'rpc',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: new AbortController().signal,
+      intervalMs: 1
+    })
+
+    expect(terminal).toMatchObject({ status: 'halted', reason: 'setup-failed', cycles: 10 })
+  })
+
+  test('reports readiness for configured markets without reading a block timestamp', async () => {
+    // Regression: readiness derived maturity from a latest-block timestamp read, so an unrelated
+    // RPC timestamp outage failed every configured market even though maturity is no longer a
+    // readiness invariant.
+    const reads: string[] = []
+    const state = new Proxy(readyState(), {
+      get: (target, key) => {
+        reads.push(String(key))
+        return Reflect.get(target, key)
+      }
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.ready).toBe(true)
+    expect(reads).not.toContain('getLatestTimestamp')
+  })
+
+  test('fails closed without retrying a transient compound book read', async () => {
+    const state = readyState()
+    let bookReads = 0
+    state.getBook = async () => {
+      bookReads += 1
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'morpho-api',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+    const reports: SetupCheckReport[] = []
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: new AbortController().signal,
+      intervalMs: 1,
+      onCycle: report => {
+        reports.push(report)
+      }
+    })
+
+    expect(bookReads).toBe(1)
+    expect(reports.map(report => report.ready)).toEqual([false])
+    expect(terminal).toMatchObject({ status: 'halted', reason: 'setup-failed', cycles: 1 })
+  })
+
+  test('does not retry a generic sanitized provider-read failure', async () => {
+    const state = readyState()
+    let bookReads = 0
+    state.getBook = async () => {
+      bookReads += 1
+      throw new ProviderReadError('morpho-api', 'market-listing')
+    }
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: new AbortController().signal,
+      intervalMs: 1
+    })
+
+    expect(bookReads).toBe(1)
+    expect(terminal).toMatchObject({ status: 'halted', reason: 'setup-failed', cycles: 1 })
+  })
+
+  test('does not retry mixed transient and invariant readiness failures', async () => {
+    const state = readyState()
+    let bookReads = 0
+    state.getBook = async () => {
+      bookReads += 1
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'morpho-api',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+    state.getNativeBalance = async () => 9n
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: new AbortController().signal,
+      intervalMs: 1
+    })
+
+    expect(bookReads).toBe(1)
+    expect(terminal).toMatchObject({ status: 'halted', reason: 'setup-failed', cycles: 1 })
+  })
+
+  test('does not retry a transient chain read that accompanies missing deployment code', async () => {
+    const state = readyState()
+    let chainReads = 0
+    state.getChainId = async () => {
+      chainReads += 1
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'rpc',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+    state.getCode = async () => '0x'
+
+    const error = await new SetupCheckService(state, config).assertReady().catch(value => value)
+
+    expect(chainReads).toBe(1)
+    expect(error).toBeInstanceOf(SetupFailedError)
+  })
+
+  test('does not retry a transient compound reference read', async () => {
+    const state = readyState()
+    let referenceReads = 0
+    state.checkReference = async () => {
+      referenceReads += 1
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'archive-rpc',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+
+    const error = await new SetupCheckService(state, config).assertReady().catch(value => value)
+
+    expect(referenceReads).toBe(1)
+    expect(error).toBeInstanceOf(SetupFailedError)
+  })
+
+  test('does not retry a transient compound offer traversal', async () => {
+    const state = readyState()
+    let offerReads = 0
+    state.inspectOffers = async () => {
+      offerReads += 1
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'morpho-api',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+
+    const error = await new SetupCheckService(state, config).assertReady().catch(value => value)
+
+    expect(offerReads).toBe(1)
+    expect(error).toBeInstanceOf(SetupFailedError)
+  })
+
+  test('does not retry a transient compound ratifier check that can mask invariant drift', async () => {
+    const state = readyState()
+    let ratifierReads = 0
+    state.getRatifier = async () => {
+      ratifierReads += 1
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'rpc',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+
+    const error = await new SetupCheckService(state, config).assertReady().catch(value => value)
+
+    expect(ratifierReads).toBe(1)
+    expect(error).toBeInstanceOf(SetupFailedError)
+  })
+
+  test('reports only the sanitized book provider failure when a market read fails', async () => {
+    const state = readyState()
+    state.getBook = async () => {
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'morpho-api',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: new AbortController().signal,
+      intervalMs: 1
+    })
+
+    expect(terminal).toMatchObject({ status: 'halted', reason: 'setup-failed', cycles: 1 })
+    if (terminal.reason === 'setup-failed') {
+      expect(terminal.lastReport.checks.find(check => check.name === 'books')?.observed).toEqual([
+        {
+          id: marketId,
+          reasons: [
+            {
+              providerError: expect.objectContaining({
+                provider: 'morpho-api',
+                name: 'TimeoutError'
+              })
+            }
+          ]
+        }
+      ])
+    }
+  })
+
+  test('stops without emitting setup failure when shutdown interrupts a transient retry', async () => {
+    const controller = new AbortController()
+    const state = readyState()
+    let bookReads = 0
+    state.getBook = async () => {
+      bookReads += 1
+      controller.abort()
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'morpho-api',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+    const reports: SetupCheckReport[] = []
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: controller.signal,
+      intervalMs: 1,
+      onCycle: report => {
+        reports.push(report)
+      }
+    })
+
+    expect(bookReads).toBe(1)
+    expect(reports).toEqual([])
+    expect(terminal).toEqual({ status: 'stopped', reason: 'signal', cycles: 0 })
+  })
+
+  test('retries transient provider-only startup readiness before allowing writers', async () => {
+    const state = readyState()
+    let balanceReads = 0
+    state.getNativeBalance = async () => {
+      balanceReads += 1
+      if (balanceReads < 3) {
+        throw new SafeProviderError({
+          kind: 'provider-error',
+          provider: 'rpc',
+          name: 'HttpError',
+          status: 503,
+          context: 'request'
+        })
+      }
+      return 10n
+    }
+
+    const report = await new SetupCheckService(state, config).assertReady()
+
+    expect(balanceReads).toBe(3)
+    expect(report.ready).toBe(true)
+  })
+
+  test('retries a numeric JSON-RPC server failure before allowing writers', async () => {
+    const state = readyState()
+    let balanceReads = 0
+    state.getNativeBalance = async () => {
+      balanceReads += 1
+      if (balanceReads === 1) {
+        throw new ProviderReadError('rpc', 'native-balance', { code: -32_005 })
+      }
+      return 10n
+    }
+
+    const report = await new SetupCheckService(state, config).assertReady()
+
+    expect(balanceReads).toBe(2)
+    expect(report.ready).toBe(true)
+  })
+
+  test('does not retry a deterministic JSON-RPC invalid-input failure at startup', async () => {
+    const state = readyState()
+    let balanceReads = 0
+    state.getNativeBalance = async () => {
+      balanceReads += 1
+      throw new ProviderReadError('rpc', 'native-balance', { code: -32_000 })
+    }
+
+    const error = await new SetupCheckService(state, config).assertReady().catch(value => value)
+
+    expect(balanceReads).toBe(1)
+    expect(error).toBeInstanceOf(SetupFailedError)
+  })
+
+  test('stops startup after shutdown even when a transient retry recovers', async () => {
+    const controller = new AbortController()
+    const state = readyState()
+    let balanceReads = 0
+    state.getNativeBalance = async () => {
+      balanceReads += 1
+      if (balanceReads === 1) {
+        throw new SafeProviderError({
+          kind: 'provider-error',
+          provider: 'rpc',
+          name: 'TimeoutError',
+          code: 'REQUEST_TIMEOUT',
+          context: 'request'
+        })
+      }
+      controller.abort()
+      return 10n
+    }
+
+    const error = await new SetupCheckService(state, config)
+      .assertReady(controller.signal)
+      .catch(value => value)
+
+    expect(balanceReads).toBe(2)
+    expect(error).toBeInstanceOf(Error)
+    expect(error).toMatchObject({ name: 'AbortError' })
+  })
+
+  test('stops startup retries after the shutdown signal is aborted', async () => {
+    const controller = new AbortController()
+    const state = readyState()
+    let bookReads = 0
+    state.getBook = async () => {
+      bookReads += 1
+      controller.abort()
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'morpho-api',
+        name: 'TimeoutError',
+        code: 'REQUEST_TIMEOUT',
+        context: 'request'
+      })
+    }
+
+    const error = await new SetupCheckService(state, config)
+      .assertReady(controller.signal)
+      .catch(value => value)
+
+    expect(bookReads).toBe(1)
+    expect(error).toBeInstanceOf(Error)
+    expect(error).toMatchObject({ name: 'AbortError' })
+  })
+
+  test('does not retry a non-transient provider response at startup', async () => {
+    const state = readyState()
+    let offerReads = 0
+    state.inspectOffers = async () => {
+      offerReads += 1
+      throw new SafeProviderError({
+        kind: 'provider-error',
+        provider: 'morpho-api',
+        name: 'HttpError',
+        status: 400,
+        context: 'request'
+      })
+    }
+
+    const error = await new SetupCheckService(state, config).assertReady().catch(value => value)
+
+    expect(offerReads).toBe(1)
+    expect(error).toBeInstanceOf(SetupFailedError)
+  })
+
+  test('rejects an invalid setup-monitor interval before any readiness read', async () => {
+    const state = readyState()
+    let reads = 0
+    state.getChainId = async () => {
+      reads += 1
+      return 8453
+    }
+    const service = new SetupCheckService(state, config)
+
+    const error = await service
+      .runContinuously({ signal: new AbortController().signal, intervalMs: 0 })
+      .catch(value => value)
+
+    expect(error).toBeInstanceOf(SetupMonitorConfigurationError)
+    expect(reads).toBe(0)
+  })
+
+  test('sanitizes an unexpected monitor writer failure', async () => {
+    const service = new SetupCheckService(readyState(), config)
+
+    const terminal = await service.runContinuously({
+      signal: new AbortController().signal,
+      intervalMs: 1,
+      onCycle: () => {
+        const error = new Error('https://rpc.example/?key=secret')
+        error.name = 'https://rpc.example/?key=secret'
+        throw error
+      }
+    })
+
+    expect(terminal).toEqual({
+      status: 'halted',
+      reason: 'cycle-error',
+      cycles: 0,
+      cycleErrorName: 'UnknownError'
+    })
+    expect(JSON.stringify(terminal)).not.toContain('secret')
+  })
+
+  test('reports every V0 setup check as passed when the maker is ready', async () => {
+    const report = await new SetupCheckService(readyState(), config).check()
+
+    expect(report.ready).toBe(true)
+    expect(report.checks.map(check => [check.name, check.status])).toEqual([
+      ['chain', 'passed'],
+      ['signer', 'passed'],
+      ['native-balance', 'passed'],
+      ['signer-native-balance', 'not-required'],
+      ['signer-authorization', 'not-required'],
+      ['signer-nonce', 'passed'],
+      ['loan-allowance', 'passed'],
+      ['ratifier', 'passed'],
+      ['books', 'passed'],
+      ['reference', 'passed'],
+      ['offers', 'passed'],
+      ['position-health', 'not-required']
+    ])
+  })
+
+  test('checks delegated AWS authorization, gas reserve, and nonce independently', async () => {
+    const state = readyState()
+    state.getDerivedSigner = async () => delegatedSigner
+    state.getNativeBalance = async address => (address === delegatedSigner ? 20n : 10n)
+    const report = await new SetupCheckService(state, {
+      ...config,
+      signerMode: 'aws',
+      signerNativeReserve: 20n
+    }).check()
+
+    expect(report.ready).toBe(true)
+    expect(
+      report.checks
+        .filter(check =>
+          ['signer', 'signer-native-balance', 'signer-authorization', 'signer-nonce'].includes(
+            check.name
+          )
+        )
+        .map(check => [check.name, check.status])
+    ).toEqual([
+      ['signer', 'passed'],
+      ['signer-native-balance', 'passed'],
+      ['signer-authorization', 'passed'],
+      ['signer-nonce', 'passed']
+    ])
+  })
+
+  test.each([
+    [
+      'signer-native-balance',
+      {
+        getNativeBalance: async (address: string) => (address === delegatedSigner ? 19n : 10n)
+      }
+    ],
+    ['signer-authorization', { getAuthorization: async () => false }],
+    ['signer-nonce', { getTransactionCounts: async () => ({ latest: 2, pending: 3 }) }]
+  ])('fails delegated AWS readiness at %s', async (failedName, override) => {
+    const state = {
+      ...readyState(),
+      getDerivedSigner: async () => delegatedSigner,
+      getNativeBalance: async (address: string) => (address === delegatedSigner ? 20n : 10n),
+      ...override
+    } as SetupStateService
+    const report = await new SetupCheckService(state, {
+      ...config,
+      signerMode: 'aws',
+      signerNativeReserve: 20n
+    }).check()
+
+    expect(report.ready).toBe(false)
+    expect(report.checks.find(check => check.name === failedName)?.status).toBe('failed')
+  })
+
+  test('permits a pending signer transaction during continuous readiness monitoring', async () => {
+    const controller = new AbortController()
+    const state = readyState()
+    let signerNonceReads = 0
+    state.getTransactionCounts = async () => {
+      signerNonceReads += 1
+      return { latest: 2, pending: 3 }
+    }
+    const reports: SetupCheckReport[] = []
+
+    const terminal = await new SetupCheckService(state, config).runContinuously({
+      signal: controller.signal,
+      intervalMs: 1,
+      onCycle: report => {
+        reports.push(report)
+        controller.abort()
+      }
+    })
+
+    expect(reports).toHaveLength(1)
+    expect(reports[0]?.ready).toBe(true)
+    expect(signerNonceReads).toBe(0)
+    expect(reports[0]?.checks.find(check => check.name === 'signer-nonce')).toMatchObject({
+      status: 'not-required',
+      required: 'one-time startup check'
+    })
+    expect(terminal).toEqual({ status: 'stopped', reason: 'signal', cycles: 1 })
+  })
+
+  test('skips only private-key derivation and preserves maker observations in read-only mode', async () => {
+    const reads: string[] = []
+    const unavailable = async (): Promise<never> => {
+      reads.push('maker-derivation')
+      throw new Error('signer-only read must not run')
+    }
+    const state = readyState()
+    state.getDerivedSigner = unavailable
+    state.getNativeBalance = async () => {
+      reads.push('native-balance')
+      return 10n
+    }
+    state.getLoanAllowance = async () => {
+      reads.push('loan-allowance')
+      return { spender: midnight, amount: maxUint256 }
+    }
+    state.getRatifier = async () => {
+      reads.push('ratifier')
+      return {
+        listed: true,
+        deployed: true,
+        midnightMatches: true,
+        surfaceMatches: true,
+        authorized: true
+      }
+    }
+
+    const report = await new SetupCheckService(state, config, true).check()
+
+    expect(reads).toEqual(['native-balance', 'loan-allowance', 'ratifier'])
+    expect(report.ready).toBe(true)
+    expect(report.checks.slice(1, 5).map(check => [check.name, check.status])).toEqual([
+      ['signer', 'not-required'],
+      ['native-balance', 'passed'],
+      ['signer-native-balance', 'not-required'],
+      ['signer-authorization', 'not-required']
+    ])
+  })
+
+  test('fails maker readiness when write mode receives no derived signer identity', async () => {
+    const state = readyState()
+    state.getDerivedSigner = async () => undefined
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.ready).toBe(false)
+    expect(report.checks.find(check => check.name === 'signer')).toEqual({
+      name: 'signer',
+      status: 'failed',
+      observed: { derived: false, matches: false },
+      required: 'local signer equals configured maker'
+    })
+  })
+
+  test('preserves a sanitized signer operation in the maker readiness check', async () => {
+    const state = readyState()
+    state.getDerivedSigner = async () => {
+      throw new SignerAccountError('kms-public-key')
+    }
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.ready).toBe(false)
+    expect(report.checks.find(check => check.name === 'signer')).toEqual({
+      name: 'signer',
+      status: 'failed',
+      observed: { kind: 'signer-error', operation: 'kms-public-key' },
+      required: 'local signer equals configured maker'
+    })
+  })
+
+  test('reports compact deployment status instead of Midnight runtime bytecode', async () => {
+    const report = await new SetupCheckService(readyState(), config).check()
+    const chain = report.checks.find(check => check.name === 'chain')
+
+    expect(chain?.observed).toMatchObject({ midnightCode: 'deployed' })
+    expect(JSON.stringify(chain)).not.toContain('0x1234')
+  })
+
+  test('preserves a typed provider id when a compound setup read fails', async () => {
+    const state = readyState()
+    state.getBook = async () => {
+      throw new ProviderReadError('morpho-api', 'market-listing')
+    }
+
+    const report = await new SetupCheckService(state, config).check()
+    const books = report.checks.find(check => check.name === 'books')
+
+    expect(books?.observed).toEqual([
+      {
+        id: marketId,
+        reasons: [
+          {
+            providerError: expect.objectContaining({
+              provider: 'morpho-api',
+              context: 'read'
+            })
+          }
+        ]
+      }
+    ])
+  })
+
+  test('preserves a typed response-error provider id in the setup report', async () => {
+    const state = readyState()
+    state.getBook = async () => {
+      throw new ProviderResponseError('morpho-api', 'market-count', 'invalid count')
+    }
+
+    const report = await new SetupCheckService(state, config).check()
+    const books = report.checks.find(check => check.name === 'books')
+
+    expect(books?.observed).toEqual([
+      {
+        id: marketId,
+        reasons: [
+          {
+            providerError: expect.objectContaining({
+              provider: 'morpho-api',
+              context: 'read'
+            })
+          }
+        ]
+      }
+    ])
+  })
+
+  test('preserves a neutral typed provider id for cross-provider validation', async () => {
+    const state = readyState()
+    state.getBook = async () => {
+      throw new ProviderResponseError('provider', 'book-loan-asset', 'providers disagree')
+    }
+
+    const report = await new SetupCheckService(state, config).check()
+    const books = report.checks.find(check => check.name === 'books')
+
+    expect(books?.observed).toEqual([
+      {
+        id: marketId,
+        reasons: [
+          {
+            providerError: expect.objectContaining({ provider: 'provider', context: 'read' })
+          }
+        ]
+      }
+    ])
+  })
+
+  test('attributes untyped offer pagination failures to the Morpho API', async () => {
+    const state = readyState()
+    state.inspectOffers = async () => {
+      throw new Error('pagination failed')
+    }
+
+    const report = await new SetupCheckService(state, config).check()
+    const offers = report.checks.find(check => check.name === 'offers')
+
+    expect(offers?.observed).toMatchObject({
+      error: { provider: 'morpho-api', context: 'read' }
+    })
+  })
+
+  test('rejects readiness with the failed check and remediation when setup is unsafe', async () => {
+    const state = readyState()
+    state.getNativeBalance = async () => 9n
+
+    const readiness = new SetupCheckService(state, config).assertReady()
+
+    await expect(readiness).rejects.toBeInstanceOf(SetupFailedError)
+    await expect(readiness).rejects.toMatchObject({
+      report: {
+        ready: false,
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            name: 'native-balance',
+            status: 'failed',
+            observed: 9n,
+            required: 10n,
+            remediation: 'fund the configured maker with native token to at least 10'
+          })
+        ])
+      }
+    })
+  })
+
+  test('records a provider failure against the exact check without exposing nested credentials', async () => {
+    const state = readyState()
+    state.checkReference = async () => {
+      const providerError = new Error(
+        'archive https://rpc-user:rpc-pass@rpc.example/path?apiKey=rpc-secret failed',
+        {
+          cause: new AggregateError([
+            new Error('https://archive.example/path?token=archive-secret'),
+            new Error('https://api.example/path?key=morpho-secret'),
+            new Error('https://router.example/path?apikey=router-secret')
+          ])
+        }
+      ) as Error & { code: string }
+      providerError.name = 'rpc-secret'
+      providerError.code = 'archive-secret'
+      throw providerError
+    }
+
+    const report = await new SetupCheckService(state, config).check()
+    const serialized = JSON.stringify(report, (_, value) =>
+      typeof value === 'bigint' ? value.toString() : value
+    )
+
+    expect(report.ready).toBe(false)
+    expect(report.checks.find(check => check.name === 'reference')).toEqual({
+      name: 'reference',
+      status: 'failed',
+      observed: {
+        error: {
+          kind: 'provider-error',
+          provider: 'archive-rpc',
+          name: 'ProviderError',
+          context: 'read'
+        }
+      },
+      required: {
+        marketId: referenceMarketId,
+        referenceReadable: true,
+        archiveReadable: true
+      }
+    })
+    for (const marker of [
+      maker,
+      'rpc-user',
+      'rpc-pass',
+      'rpc-secret',
+      'archive-secret',
+      'morpho-secret',
+      'router-secret'
+    ]) {
+      expect(serialized).not.toContain(marker)
+    }
+    expect(report.checks.find(check => check.name === 'offers')?.status).toBe('passed')
+  })
+
+  test('runs independent reads concurrently and keeps a complete report after rejections', async () => {
+    const started: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const wait = async <T>(name: string, value: T) => {
+      started.push(name)
+      await gate
+      return value
+    }
+    const state = readyState()
+    state.getChainId = () => wait('chain-id', 8453)
+    state.getCode = () => wait('code', '0x1234')
+    state.getDerivedSigner = () => wait('maker', maker)
+    state.getNativeBalance = () => wait('balance', 10n)
+    state.getLoanAllowance = () => wait('allowance', { spender: midnight, amount: maxUint256 })
+    state.getRatifier = () =>
+      wait('ratifier', {
+        listed: true,
+        deployed: true,
+        midnightMatches: true,
+        surfaceMatches: true,
+        authorized: true
+      })
+    state.getBook = id =>
+      wait(`book:${id}`, {
+        id,
+        allowlisted: true,
+        active: true,
+        loanAsset,
+        tickSpacing: 1
+      })
+    state.checkReference = async () => {
+      started.push('reference')
+      await gate
+      throw new Error('archive unavailable')
+    }
+    state.inspectOffers = () =>
+      wait('offers', { unknownNamespaces: [], unknownMarketIds: [], invertedMarketIds: [] })
+    state.checkPositionHealth = () =>
+      wait('position-health', { status: 'not-required' as const, reason: 'V0 has no debt' })
+
+    const reportPromise = new SetupCheckService(state, config).check()
+    await Promise.resolve()
+
+    expect(started.toSorted()).toEqual(
+      [
+        'chain-id',
+        'code',
+        'maker',
+        'balance',
+        'allowance',
+        'ratifier',
+        `book:${marketId}`,
+        'reference',
+        'offers',
+        'position-health'
+      ].toSorted()
+    )
+    release()
+
+    const report = await reportPromise
+    expect(report.checks.find(check => check.name === 'reference')?.status).toBe('failed')
+    expect(report.checks.find(check => check.name === 'offers')?.status).toBe('passed')
+  })
+
+  test('converts every rejected provider surface into its named report item', async () => {
+    const unavailable = async () => {
+      throw new Error('provider unavailable')
+    }
+    const state = readyState()
+    state.getChainId = unavailable
+    state.getCode = unavailable
+    state.getDerivedSigner = unavailable
+    state.getNativeBalance = unavailable
+    state.getLoanAllowance = unavailable
+    state.getRatifier = unavailable
+    state.getBook = unavailable
+    state.checkReference = unavailable
+    state.inspectOffers = unavailable
+    state.checkPositionHealth = unavailable
+
+    const error = await new SetupCheckService(state, config).assertReady().catch(value => value)
+
+    expect(error).toBeInstanceOf(SetupFailedError)
+    expect(error.name).toBe('SetupFailedError')
+    expect(
+      error.report.checks.map((check: { name: string; status: string }) => [
+        check.name,
+        check.status
+      ])
+    ).toEqual([
+      ['chain', 'failed'],
+      ['signer', 'failed'],
+      ['native-balance', 'failed'],
+      ['signer-native-balance', 'not-required'],
+      ['signer-authorization', 'not-required'],
+      ['signer-nonce', 'failed'],
+      ['loan-allowance', 'failed'],
+      ['ratifier', 'failed'],
+      ['books', 'failed'],
+      ['reference', 'failed'],
+      ['offers', 'failed'],
+      ['position-health', 'failed']
+    ])
+  })
+
+  test('rejects a book response whose id differs from the requested configured market', async () => {
+    const state = readyState()
+    state.getBook = async () => ({
+      id: secondMarketId,
+      allowlisted: true,
+      active: true,
+      loanAsset,
+      tickSpacing: 1
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'books')?.observed).toEqual([
+      { id: marketId, reasons: [`provider returned ${secondMarketId}`] }
+    ])
+  })
+
+  test('fails books when no market is configured', async () => {
+    const report = await new SetupCheckService(readyState(), { ...config, marketIds: [] }).check()
+
+    expect(report.checks.find(check => check.name === 'books')).toEqual({
+      name: 'books',
+      status: 'failed',
+      observed: [{ id: '(none)', reasons: ['no markets configured'] }],
+      required: 'all configured books valid'
+    })
+  })
+
+  test('fails the named reference check when the provider reads a different market', async () => {
+    const state = readyState()
+    state.checkReference = async () => ({
+      marketId,
+      referenceReadable: true,
+      archiveReadable: true
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'reference')).toMatchObject({
+      name: 'reference',
+      status: 'failed',
+      observed: { marketId },
+      required: { marketId: referenceMarketId }
+    })
+  })
+
+  test('accepts exact funding thresholds', async () => {
+    const exactThresholds = await new SetupCheckService(readyState(), config).check()
+    expect(exactThresholds.checks.find(check => check.name === 'native-balance')?.status).toBe(
+      'passed'
+    )
+    expect(exactThresholds.checks.find(check => check.name === 'loan-allowance')?.status).toBe(
+      'passed'
+    )
+  })
+
+  test('keeps an unbounded approval ready after fills have decremented it', async () => {
+    const state = readyState()
+    state.getLoanAllowance = async () => ({
+      spender: midnight,
+      amount: maxUint256 - 26_780_747_345n
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'loan-allowance')?.status).toBe('passed')
+  })
+
+  test('fails any finite approval and remediates with an unbounded one', async () => {
+    const state = readyState()
+    state.getLoanAllowance = async () => ({ spender: midnight, amount: 16_000_000_000n })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'loan-allowance')).toMatchObject({
+      status: 'failed',
+      remediation: { functionName: 'approve', args: [midnight, maxUint256] }
+    })
+  })
+
+  test('pins the unbounded floor at half of maxUint256', async () => {
+    const statusFor = async (amount: bigint) => {
+      const state = readyState()
+      state.getLoanAllowance = async () => ({ spender: midnight, amount })
+      const report = await new SetupCheckService(state, config).check()
+      return report.checks.find(check => check.name === 'loan-allowance')?.status
+    }
+
+    expect(await statusFor(maxUint256 / 2n)).toBe('passed')
+    expect(await statusFor(maxUint256 / 2n - 1n)).toBe('failed')
+  })
+
+  test('warns without blocking readiness when a live group cannot be attributed', async () => {
+    const state = readyState()
+    state.inspectOffers = async () => ({
+      unknownNamespaces: [`0x${'ab'.repeat(32)}`],
+      unknownMarketIds: [],
+      invertedMarketIds: []
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'offers')?.status).toBe('warning')
+    expect(report.ready).toBe(true)
+  })
+
+  test.each([
+    ['unknownMarketIds', { unknownMarketIds: [secondMarketId], invertedMarketIds: [] }],
+    ['invertedMarketIds', { unknownMarketIds: [], invertedMarketIds: [marketId] }]
+  ])('fails readiness for offers outside the exposure model via %s', async (_name, unsafe) => {
+    const state = readyState()
+    state.inspectOffers = async () => ({ unknownNamespaces: [], ...unsafe })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'offers')?.status).toBe('failed')
+    expect(report.ready).toBe(false)
+  })
+
+  test('reports every unsafe book property so the operator can remediate it', async () => {
+    const state = readyState()
+    state.getBook = async id => ({
+      id,
+      allowlisted: false,
+      active: false,
+      loanAsset: ratifier,
+      tickSpacing: 0
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'books')).toEqual({
+      name: 'books',
+      status: 'failed',
+      observed: [
+        {
+          id: marketId,
+          reasons: [
+            'not allowlisted',
+            'inactive',
+            `unexpected loan asset ${ratifier}`,
+            'tick spacing is inaccessible'
+          ]
+        }
+      ],
+      required: 'all configured books valid'
+    })
+  })
+
+  test('returns allowance details and a maker-redacted authorization instruction', async () => {
+    const state = readyState()
+    state.getLoanAllowance = async () => ({ spender: midnight, amount: 99n })
+    state.getRatifier = async () => ({
+      listed: true,
+      deployed: true,
+      midnightMatches: true,
+      surfaceMatches: true,
+      authorized: false
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.checks.find(check => check.name === 'loan-allowance')?.remediation).toEqual({
+      to: loanAsset,
+      functionName: 'approve',
+      args: [midnight, maxUint256]
+    })
+    expect(report.checks.find(check => check.name === 'ratifier')?.remediation).toBe(
+      'authorize the configured maker with the selected ratifier'
+    )
+  })
+
+  test('fails closed for every unsafe V0 setup surface', async () => {
+    const state = readyState()
+    state.getChainId = async () => 1
+    state.getCode = async () => '0x'
+    state.getDerivedSigner = async () => ratifier
+    state.getNativeBalance = async () => 9n
+    state.getLoanAllowance = async () => ({ spender: ratifier, amount: 99n })
+    state.getRatifier = async () => ({
+      listed: false,
+      deployed: false,
+      midnightMatches: false,
+      surfaceMatches: false,
+      authorized: false
+    })
+    state.getBook = async id => ({
+      id,
+      allowlisted: false,
+      active: false,
+      loanAsset: ratifier,
+      tickSpacing: 0
+    })
+    state.checkReference = async () => ({
+      marketId: referenceMarketId,
+      referenceReadable: false,
+      archiveReadable: false
+    })
+    state.inspectOffers = async () => ({
+      unknownNamespaces: ['v0:unknown'],
+      unknownMarketIds: [marketId],
+      invertedMarketIds: [marketId]
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.ready).toBe(false)
+    expect(
+      report.checks.filter(check => check.status === 'failed').map(check => check.name)
+    ).toEqual([
+      'chain',
+      'signer',
+      'native-balance',
+      'loan-allowance',
+      'ratifier',
+      'books',
+      'reference',
+      'offers'
+    ])
+    expect(report.checks.find(check => check.name === 'position-health')?.status).toBe(
+      'not-required'
+    )
+  })
+
+  test('fails the offers check when an active group remains on an unconfigured market', async () => {
+    const state = readyState()
+    state.inspectOffers = async () => ({
+      unknownNamespaces: [],
+      unknownMarketIds: [marketId],
+      invertedMarketIds: []
+    })
+
+    const report = await new SetupCheckService(state, config).check()
+
+    expect(report.ready).toBe(false)
+    expect(report.checks.find(check => check.name === 'offers')).toMatchObject({
+      status: 'failed',
+      observed: { unknownMarketIds: [marketId] }
+    })
+  })
+
+  test('obtains the V0 position-health result through its reserved port', async () => {
+    const report = await new SetupCheckService(readyState(), config).check()
+
+    expect(report.checks.find(check => check.name === 'position-health')).toEqual({
+      name: 'position-health',
+      status: 'not-required',
+      observed: { status: 'not-required', reason: 'V0 has no debt' },
+      required: 'not-required for V0'
+    })
+  })
+})

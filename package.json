@@ -1,0 +1,34 @@
+{
+  "name": "@morpho-org/morpho-bots",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --filter @repo/contracts run build",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "knip": "knip",
+    "lint": "oxlint --no-error-on-unmatched-pattern && pnpm run lint:playground-smoke",
+    "lint:fix": "oxlint --fix --no-error-on-unmatched-pattern",
+    "lint:playground-smoke": "oxlint --config bots/quoter-bot/scripts/playground-smoke.oxlintrc.json bots/quoter-bot/scripts/playground-smoke*.mjs",
+    "quoter-bot:playground": "pnpm --filter @morpho-org/quoter-bot run playground:serve",
+    "prepare": "husky",
+    "test": "vitest run && pnpm --filter @morpho-org/quoter-bot run playground:test"
+  },
+  "devDependencies": {
+    "@repo/typescript-config": "workspace:*",
+    "@types/node": "catalog:",
+    "husky": "catalog:",
+    "knip": "catalog:",
+    "lint-staged": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": "^24.14.1"
+  },
+  "packageManager": "pnpm@11.1.1"
+}
