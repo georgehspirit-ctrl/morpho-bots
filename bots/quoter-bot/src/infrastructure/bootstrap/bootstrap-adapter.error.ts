@@ -1,4 +1,5 @@
 import type { BootstrapSubmittedTransaction } from '../../application/bootstrap/position-bootstrap-verbose'
+import type { OperatorAdapterOperation } from '../../application/operator-error-name.utils'
 
 /** Stable production-adapter failure without provider URLs, payloads, or secret material. */
 export class BootstrapAdapterError extends Error {
@@ -8,7 +9,7 @@ export class BootstrapAdapterError extends Error {
   confirmedTransactions: readonly BootstrapSubmittedTransaction[] = []
 
   /** Creates a sanitized failure for one fixed adapter operation. @param operation - Stable operation code. */
-  constructor(readonly operation: string) {
+  constructor(readonly operation: OperatorAdapterOperation) {
     super('Position bootstrap adapter failed')
     this.name = 'BootstrapAdapterError'
   }

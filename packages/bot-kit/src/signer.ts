@@ -82,10 +82,7 @@ export function createAccountSigner(options: {
   policy?: Policy | undefined
   logger?: Logger | undefined
 }): Signer {
-  // viem-dlc's `failover` transport types its options as `unknown`, which isn't assignable to viem's
-  // `Transport` (Record options) — the cast is safe (it's a valid runtime transport). The deployless
-  // read client sidesteps this by re-wrapping the base transport in `deployless`.
-  const transport = createHttpTransport(options.rpcUrl, options.rpcUrlFallback) as Transport
+  const transport = createHttpTransport(options.rpcUrl, options.rpcUrlFallback)
   const { account } = options
   const client = createWalletClient({ account, chain: options.chain, transport })
   // A raw transaction is sent to exactly one endpoint. Falling through to a second endpoint after

@@ -1,4 +1,5 @@
 import type { LadderSubmittedTransaction } from '../../application/ladder/ladder-verbose'
+import type { OperatorAdapterOperation } from '../../application/operator-error-name.utils'
 
 /** Stable production ladder-adapter failure without provider data or credentials. */
 export class LadderAdapterError extends Error {
@@ -7,7 +8,7 @@ export class LadderAdapterError extends Error {
   confirmedTransactions: readonly LadderSubmittedTransaction[] = []
 
   /** Creates one sanitized adapter failure. @param operation - Stable failed operation code. */
-  constructor(readonly operation: string) {
+  constructor(readonly operation: OperatorAdapterOperation) {
     super('Ladder adapter failed')
     this.name = 'LadderAdapterError'
   }

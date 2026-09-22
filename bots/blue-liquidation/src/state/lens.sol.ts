@@ -1,11 +1,6 @@
 import type { Client, Transport } from 'viem'
 
-import {
-  type BatchLensTransportType,
-  lensKey,
-  MAX_INITCODE_SIZE,
-  readDeploylessBatchLens
-} from '@repo/utils'
+import { type BatchLensTransportType, lensKey, readDeploylessBatchLens } from '@repo/utils'
 import { sol } from 'soltag'
 import { type Address } from 'viem'
 
@@ -94,21 +89,27 @@ contract BlueLiquidationLens {
     return _mulDivUp(shares, totalAssets + VIRTUAL_ASSETS, totalShares + VIRTUAL_SHARES);
   }
 
-  function lens(Input[] calldata input) external view returns (LensOut[] memory output) {
-    output = new LensOut[](input.length);
-    for (uint256 i = 0; i < input.length; i++) {
-      // Per-element isolation: a revert (unknown market, reverting oracle/IRM) leaves output[i] as a
-      // zeroed LensOut (valid=false) instead of reverting the whole batch. computeOne is external
-      // view, so the self-call is a STATICCALL and cannot mutate state.
-      try this.computeOne(input[i]) returns (LensOut memory o) {
-        output[i] = o;
-      } catch {
-        // output[i] keeps its zeroed (valid=false) default.
-      }
+  // Must not revert for an input it simply cannot price: a declined element is indistinguishable
+  // from one the provider refused, so an unpriceable input is data (valid=false) and a revert is
+  // left to mean something is wrong.
+  //
+  // Running out of gas is NOT such an input. EIP-150 keeps 1/64 of the forwarded gas in this frame,
+  // so a child that died of gas still lets the catch run and would be recorded as a SERVED
+  // valid=false row — which the envelope never retries and declined:'throw' cannot see, silently
+  // dropping the position from the liquidation set. Returndata cannot tell the two apart, but gas
+  // can: a child that consumed essentially its whole allowance ran out, so re-revert and let the
+  // element be declined (loud) rather than answered wrongly (silent).
+  function computeOne(Input calldata e) external view returns (LensOut memory o) {
+    uint256 forwarded = gasleft();
+    try this.computeOneInner(e) returns (LensOut memory r) {
+      o = r;
+    } catch {
+      if (gasleft() < forwarded / 32) revert();
+      // o keeps its zeroed (valid=false) default.
     }
   }
 
-  function computeOne(Input calldata e) external view returns (LensOut memory o) {
+  function computeOneInner(Input calldata e) external view returns (LensOut memory o) {
     // id-commitment check: derive the id from the SUPPLIED params and read state at it. A forged
     // param set derives an id with no market (lastUpdate == 0) -> revert -> valid=false.
     bytes32 id = keccak256(abi.encode(e.params));
@@ -188,28 +189,20 @@ export async function readBlueLiquidationLens(
   morpho: Address,
   pairs: readonly LensInput[]
 ): Promise<Map<string, LensOut>> {
-  return readDeploylessBatchLens(
+  // No `batch.gas`: the old polynomial fit does not carry over (the new model's `fixed` excludes the
+  // copy of the chunk's own bytes, where `constant` folded in CREATE overhead), and a model viem-dlc
+  // rejects as malformed is ignored silently in favour of packing by bytes. A chunk resizes from what
+  // its own pages report, so stating nothing costs continuation round trips and never a result —
+  // strictly better than a translated guess. Populate from the wide event's `fixed_gas` /
+  // `item_gas_avg` / `item_gas_stddev` once real traffic has been observed.
+  return readDeploylessBatchLens({
     client,
-    {
+    parameters: {
       ...BlueLiquidationLens.with(morpho),
-      functionName: 'lens',
-      args: [pairs],
-      batch: {
-        batchSize: MAX_INITCODE_SIZE,
-        exfil: 'revert',
-        compress: false,
-        // MEASURED on an ephemeral anvil fork of Base against 128 real (marketParams, borrower) pairs
-        // (deploy the lens to the fork, eth_estimateGas the batch across an N-ladder): the fit was
-        // gas(N) ≈ 150k + 32.4k·N (r²=0.997), so `linear = 33_000` is the per-element cost (market +
-        // position + oracle + IRM `borrowRateView` accrual + health). The `constant` folds in the
-        // ~750k deployless CREATE + code-deposit overhead the deployed-contract fit doesn't see,
-        // rounded up with margin. Under-budgeting is self-correcting anyway — viem-dlc's chunker
-        // halve-and-retries any batch that exceeds the RPC gas cap. Re-measure the same way if the lens
-        // body changes materially.
-        gas: { default: { constant: 1_000_000, linear: 33_000, quadratic: 0 } }
-      }
+      functionName: 'computeOne',
+      args: pairs
     },
-    ({ params, borrower }) => lensKey(marketId(params), borrower),
-    (input, out): LensOut => ({ ...out, params: input.params })
-  )
+    key: ({ params, borrower }) => lensKey(marketId(params), borrower),
+    value: (input, out): LensOut => ({ ...out, params: input.params })
+  })
 }

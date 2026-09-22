@@ -5,6 +5,8 @@ import type { LadderRunResult } from '../ladder/ladder-quoter.service'
 import type { LadderGroupConsumption, LadderVerboseDetails } from '../ladder/ladder-verbose'
 import type { MonitoringEvent, MonitoringSide } from './monitoring-event'
 
+import { adapterOperationOf } from './monitoring-event'
+
 const SIDES: readonly MonitoringSide[] = ['lower', 'higher']
 
 const defined = <Key extends string>(key: Key, value: bigint | undefined) =>
@@ -208,6 +210,7 @@ export const ladderMonitoringEvents = (
         ...('action' in result ? { action: result.action } : {}),
         ...('reason' in result ? { reason: result.reason } : {}),
         ...('errorName' in result ? { errorName: result.errorName } : {}),
+        ...adapterOperationOf(result),
         ...(result.verbose?.durationMs === undefined
           ? {}
           : { durationMs: result.verbose.durationMs })
@@ -220,7 +223,8 @@ export const ladderMonitoringEvents = (
         marketId,
         stage: result.stage,
         reason: result.errorName,
-        strategyInvalidated: result.strategyInvalidated
+        strategyInvalidated: result.strategyInvalidated,
+        ...adapterOperationOf(result)
       })
     }
     if (result.verbose) events.push(...verboseEvents(marketId, result.verbose, result.status))

@@ -127,6 +127,17 @@ helm install quoter-bot bots/quoter-bot/helm/quoter-bot \
   --namespace quoter-bot --create-namespace --values my-values.yaml
 ```
 
+## One release per chain
+
+Run a separate Helm release for every chain. Each release gets its own singleton StatefulSet and
+retained state claim, while the same maker and signer may be used on different EVM chains. Set
+`instance.chainId` when `existingConfigSecret` supplies the bot configuration; for chart-managed
+`config`, the chart infers it from `config.chain.id` and rejects a conflicting explicit value.
+
+The installed chain identity is pinned alongside the StatefulSet name. An upgrade cannot move an
+existing release and its ownership state to another chain: install another release instead. Keep
+release names, config Secrets, runtime Secrets, and PVCs chain-qualified in multi-chain deployments.
+
 For AWS mode, omit the private-key Secret. Give the pod direct `kms:GetPublicKey` and `kms:Sign`
 access to one `ECC_SECG_P256K1` key, set the AWS identity fields, and set
 `setup.signerNativeReserveWei`. The KMS signer must differ from the maker, and the ratifier must be
@@ -181,6 +192,7 @@ files over `--set` for the `config` block for the same reason.
 | `priorityClassName`                                | `''`                                              | Optional pod priority class.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `serviceAccount.create` / `.name` / `.annotations` | `false` / `''` / `{}`                             | Dedicated ServiceAccount for workload-identity signers (AWS IRSA / EKS Pod Identity with the `aws` key-storage method); annotate with e.g. `eks.amazonaws.com/role-arn`. The pod keeps `automountServiceAccountToken: false` — credential webhooks inject their own projected tokens.                                                                                                                                                                                                                                                                         |
 | `nameOverride` / `fullnameOverride`                | `''`                                              | Standard naming overrides.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `instance.chainId`                                 | `''`                                              | Stable EVM chain identity for this release. Inferred from chart-managed `config.chain.id`; set explicitly with `existingConfigSecret`. An installed release cannot change chains.                                                                                                                                                                                                                                                                                                                                                                             |
 
 ### Configuration
 
@@ -210,12 +222,13 @@ files over `--set` for the `config` block for the same reason.
 
 ## Operations
 
-- **Singleton writer.** The chart runs a one-replica StatefulSet: the bot's nonce cursor,
+- **Singleton writer per chain.** The chart runs a one-replica StatefulSet: the bot's nonce cursor,
   serialized mutation queue, and ownership state are per-instance, and a StatefulSet never
   creates the replacement pod until the old one is confirmed fully terminated — covering
   rollouts, graceful pod deletion, and eviction alike, which a Deployment (even with
   `Recreate`) only guarantees for rollouts. Never scale it or point a second release at the
-  same maker. Kubernetes' one documented exception is **force deletion**: never
+  same maker on the same chain. A distinct release may use that maker on another chain.
+  Kubernetes' one documented exception is **force deletion**: never
   `kubectl delete pod --force --grace-period=0` (or force-delete a partitioned Node object) —
   the controller then replaces the pod while the original writer may still be running, and the
   bot deliberately has no Kubernetes API access or external lock to defend itself. Fence a

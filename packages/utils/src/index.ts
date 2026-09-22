@@ -1,3 +1,4 @@
+export * from './helpers/adaptive-curve'
 export * from './helpers/addresses'
 export * from './helpers/bigint'
 export * from './helpers/collect-pages'

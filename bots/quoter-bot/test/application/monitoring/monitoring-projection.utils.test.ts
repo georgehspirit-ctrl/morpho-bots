@@ -105,6 +105,31 @@ describe('createMonitoringProjection', () => {
     expect(spreadRejections()).toEqual([])
   })
 
+  test('ships the bootstrap halt adapter operation on both halt records', () => {
+    const events = createMonitoringProjection().bootstrap([
+      {
+        marketId,
+        status: 'halted',
+        stage: 'reference-read',
+        strategyInvalidated: true,
+        errorName: 'BootstrapAdapterError',
+        adapterOperation: 'reference-checkpoint'
+      }
+    ] as unknown as readonly BootstrapRunResult[])
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        event: 'cycle.completed',
+        status: 'halted',
+        adapterOperation: 'reference-checkpoint'
+      }),
+      expect.objectContaining({
+        event: 'guardrail.halted',
+        adapterOperation: 'reference-checkpoint'
+      })
+    ])
+  })
+
   test('omits market attribution for halted bootstrap settlements', () => {
     const transaction = { operation: 'cancel' as const, txHash: `0x${'33'.repeat(32)}` as const }
     const events = createMonitoringProjection().bootstrap([

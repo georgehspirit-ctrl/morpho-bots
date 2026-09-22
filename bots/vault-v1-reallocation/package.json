@@ -16,6 +16,7 @@
     "@morpho-org/blue-sdk": "catalog:",
     "@morpho-org/blue-sdk-viem": "catalog:",
     "@repo/bot-kit": "workspace:*",
+    "@repo/contracts": "workspace:*",
     "@repo/utils": "workspace:*",
     "solc": "catalog:",
     "soltag": "catalog:",

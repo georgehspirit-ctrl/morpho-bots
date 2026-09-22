@@ -18,6 +18,7 @@ import { LadderQuoterService } from '../../../src/application/ladder/ladder-quot
 import { MARKET_FAILURE_BUDGET_CYCLES } from '../../../src/application/market-failure-budget.utils'
 import { ladderMonitoringEvents } from '../../../src/application/monitoring/ladder-monitoring.utils'
 import { LadderAdapterError } from '../../../src/infrastructure/ladder/ladder-adapter.error'
+import { ReferenceAdapterError } from '../../../src/infrastructure/reference/reference-adapter.error'
 
 const marketId: Hex = `0x${'55'.repeat(32)}`
 const secondMarketId: Hex = `0x${'66'.repeat(32)}`
@@ -718,7 +719,7 @@ describe('LadderQuoterService', () => {
       },
       {
         async readRate() {
-          throw new RangeError('private')
+          throw new ReferenceAdapterError('reference-history')
         }
       },
       {
@@ -737,7 +738,16 @@ describe('LadderQuoterService', () => {
     )
     const result = await subject.service.runOnce()
     expect(subject.halts).toEqual(['reference-read-failed'])
-    expect(result).toMatchObject([{ status: 'halted' }])
+    expect(result).toEqual([
+      {
+        marketId: config().marketId,
+        status: 'halted',
+        stage: 'reference-read',
+        strategyInvalidated: true,
+        errorName: 'ReferenceAdapterError',
+        adapterOperation: 'reference-history'
+      }
+    ])
   })
 
   test('retains strategy-wide hard-halt settlements for verbose monitoring', async () => {

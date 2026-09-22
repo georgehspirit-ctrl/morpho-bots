@@ -54,7 +54,10 @@ const makeDeps = (overrides: Partial<TickDeps> = {}) => {
     vaults: [VAULT_A],
     chainHead: 100n,
     eoa: EOA,
-    fetchVault: vi.fn(async () => someVaultData()),
+    fetchVaults: vi.fn(
+      async (vaults: readonly Address[]) =>
+        new Map(vaults.map(vault => [vault.toLowerCase(), someVaultData()]))
+    ),
     strategy: vi.fn(() => undefined),
     encodeReallocate: vi.fn(() => DATA),
     simulate: vi.fn(async () => ({ status: 'ok' as const })),
@@ -83,7 +86,7 @@ describe('runTick', () => {
   it('passes the tick chainHead into the vault fetch (block-pinned snapshot)', async () => {
     const { deps } = makeDeps({ chainHead: 123n })
     await runTick(deps)
-    expect(deps.fetchVault).toHaveBeenCalledWith(VAULT_A, 123n)
+    expect(deps.fetchVaults).toHaveBeenCalledWith([VAULT_A], 123n)
   })
 
   it('does nothing when the strategy finds no reallocation', async () => {
@@ -137,12 +140,17 @@ describe('runTick', () => {
   it('skips a vault whose label is in flight', async () => {
     const { deps, events } = makeDeps({ inflightLabels: () => new Set([VAULT_A]) })
     await runTick(deps)
-    expect(deps.fetchVault).not.toHaveBeenCalled()
+    expect(deps.fetchVaults).not.toHaveBeenCalled()
     expect(tickEnd(events)).toMatchObject({ skipped_inflight: 1 })
   })
 
   it('skips strategy/simulate while the allocator role is missing', async () => {
-    const { deps, events } = makeDeps({ fetchVault: vi.fn(async () => notAnAllocator()) })
+    const { deps, events } = makeDeps({
+      fetchVaults: vi.fn(
+        async (vaults: readonly Address[]) =>
+          new Map(vaults.map(vault => [vault.toLowerCase(), notAnAllocator()]))
+      )
+    })
     await runTick(deps)
     expect(deps.strategy).not.toHaveBeenCalled()
     expect(deps.simulate).not.toHaveBeenCalled()
@@ -160,7 +168,10 @@ describe('runTick', () => {
   ])('accepts a %s-keyed EOA that is not in the allocator set', async (_role, eoa) => {
     const { deps, events } = makeDeps({
       eoa,
-      fetchVault: vi.fn(async () => notAnAllocator()),
+      fetchVaults: vi.fn(
+        async (vaults: readonly Address[]) =>
+          new Map(vaults.map(vault => [vault.toLowerCase(), notAnAllocator()]))
+      ),
       strategy: vi.fn(() => someAllocations())
     })
     await runTick(deps)
@@ -168,23 +179,56 @@ describe('runTick', () => {
     expect(tickEnd(events)).toMatchObject({ missing_role: 0, submitted: 1 })
   })
 
-  it('processes vaults concurrently and folds their counters', async () => {
+  it('reads every eligible vault in ONE call and still processes them concurrently', async () => {
     let inFlight = 0
     let maxInFlight = 0
-    const fetchVault = vi.fn(async () => {
+    const simulate = vi.fn(async () => {
       maxInFlight = Math.max(maxInFlight, ++inFlight)
       await Promise.resolve()
       inFlight--
-      return someVaultData()
+      return { status: 'ok' as const }
     })
     const { deps, events } = makeDeps({
       vaults: [VAULT_A, VAULT_B],
-      fetchVault,
+      simulate,
       strategy: vi.fn(() => someAllocations())
     })
     await runTick(deps)
+    // The read is batched — one request for the pass, not one per vault — but the per-vault work
+    // after it still overlaps.
+    expect(deps.fetchVaults).toHaveBeenCalledTimes(1)
+    expect(deps.fetchVaults).toHaveBeenCalledWith([VAULT_A, VAULT_B], 100n)
     expect(maxInFlight).toBe(2)
     expect(tickEnd(events)).toMatchObject({ vaults: 2, reallocations_found: 2, submitted: 2 })
+  })
+
+  it('fans a rejected batch out over every eligible vault', async () => {
+    // The read is the one shared point of failure now: a rejection yields no rows at all. Without an
+    // explicit fan-out the pass would close reporting nothing, so an operator would see a quiet tick
+    // rather than a whitelist-wide outage.
+    const fetchVaults = vi.fn(async () => {
+      throw new Error('rpc exploded')
+    })
+    const { deps, events } = makeDeps({ vaults: [VAULT_A, VAULT_B], fetchVaults })
+    await runTick(deps)
+    for (const vault of [VAULT_A, VAULT_B]) {
+      expect(events).toContainEqual({
+        level: 'error',
+        event: 'vault.error',
+        fields: { vault, reason: 'rpc exploded' }
+      })
+    }
+    expect(tickEnd(events)).toMatchObject({ errors: 2, vaults: 2 })
+  })
+
+  it('does not pay for an in-flight vault, filtering before the batch is built', async () => {
+    const { deps, events } = makeDeps({
+      vaults: [VAULT_A, VAULT_B],
+      inflightLabels: () => new Set([VAULT_A])
+    })
+    await runTick(deps)
+    expect(deps.fetchVaults).toHaveBeenCalledWith([VAULT_B], 100n)
+    expect(tickEnd(events)).toMatchObject({ skipped_inflight: 1 })
   })
 
   it('reads the in-flight label set once per pass', async () => {
@@ -194,18 +238,22 @@ describe('runTick', () => {
     expect(inflightLabels).toHaveBeenCalledTimes(1)
   })
 
-  it('continues past a failing vault and reports vault.error', async () => {
-    const fetchVault = vi.fn(async (vault: Address) => {
-      if (vault === VAULT_A) throw new Error('rpc exploded')
-      return someVaultData()
-    })
-    const { deps, events } = makeDeps({ vaults: [VAULT_A, VAULT_B], fetchVault })
+  it('continues past a vault the batch could not serve and reports vault.error', async () => {
+    // A row missing from an otherwise-successful read: the envelope declined that element. The
+    // others must still run.
+    const fetchVaults = vi.fn(
+      async (vaults: readonly Address[]) =>
+        new Map(
+          vaults.filter(v => v !== VAULT_A).map(vault => [vault.toLowerCase(), someVaultData()])
+        )
+    )
+    const { deps, events } = makeDeps({ vaults: [VAULT_A, VAULT_B], fetchVaults })
     await runTick(deps)
-    expect(fetchVault).toHaveBeenCalledTimes(2)
+    expect(fetchVaults).toHaveBeenCalledTimes(1)
     expect(events).toContainEqual({
       level: 'error',
       event: 'vault.error',
-      fields: { vault: VAULT_A, reason: 'rpc exploded' }
+      fields: { vault: VAULT_A, reason: 'lens returned no row for this vault' }
     })
     expect(tickEnd(events)).toMatchObject({ errors: 1 })
   })

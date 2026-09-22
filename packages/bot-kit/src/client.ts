@@ -1,33 +1,60 @@
 import type { BatchLensTransportType } from '@repo/utils'
 import type { Address, Chain, Client, Transport } from 'viem'
 
-import { deployless } from '@morpho-org/viem-dlc/transports'
 import { createPublicClient } from 'viem'
 import { getCode } from 'viem/actions'
 
-import { createHttpTransport } from './transport'
-
-// Gas the deployless lens may burn in its single eth_call. Matches the prime-monorepo reference
-// (packages/resolvers/test/measure/clients.ts); the lens itself is read-only so a generous ceiling
-// is harmless.
-const DEPLOYLESS_GAS_LIMIT = 550_000_000
+import { withDlcFacts } from './chain-facts'
+import { createDeploylessTransport } from './transport'
 
 /**
- * Builds the read-only viem client a bot's lens and simulate paths share: an HTTP transport (a
- * viem-dlc `failover` pair when `rpcUrlFallback` is set, else a single endpoint) wrapped in
- * viem-dlc's `deployless` transport so the bot's batch lens can run deploylessly. Plain reads
- * (`getCode`, `eth_call`) pass straight through to the base transport. The return is typed against
- * {@link BatchLensTransportType} so `readDeploylessBatchLens`-based fetchers accept it without a cast.
+ * Caps the bytes of one chunk's `eth_call` data, below whatever the provider itself accepts. Only
+ * set it when an endpoint rejects large requests; the chain's initcode limit and the frame's gas
+ * already bound a chunk.
+ *
+ * Fails loud on anything it cannot read exactly, matching the bots' own `intEnv`: `parseInt` would
+ * take `100kb` as 100 and quietly chunk every lens read to 100 bytes, and a value past 2^53 would
+ * lose precision rather than being rejected.
+ */
+function maxBatchSize(env: Record<string, string | undefined>): number | undefined {
+  const raw = env.MAX_DEPLOYLESS_BATCH_SIZE?.trim()
+  if (!raw) return undefined
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`MAX_DEPLOYLESS_BATCH_SIZE must be a positive integer, got: ${raw}`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`MAX_DEPLOYLESS_BATCH_SIZE must be a positive safe integer, got: ${raw}`)
+  }
+  return value
+}
+
+/**
+ * Builds the read-only viem client a bot's lens and simulate paths share: one `deployless` transport
+ * per endpoint, behind a viem-dlc `failover` when `rpcUrlFallback` is set, so each provider states
+ * its own `eth_call` gas cap. Plain reads (`getCode`, `eth_call`) carry no `policy` sentinel and pass
+ * straight through. The return is typed against {@link BatchLensTransportType} so
+ * `readDeploylessBatchLens`-based fetchers accept it without a cast.
+ *
+ * The chain's viem-dlc facts are attached HERE rather than at each bot's config, so a chain that
+ * reaches this function can never be missing them — `deployless` would otherwise throw while the
+ * client is being built, at whichever call site forgot.
  */
 export function createDeploylessClient(options: {
   chain: Chain
   rpcUrl: string
   rpcUrlFallback?: string | undefined
+  env?: Record<string, string | undefined>
 }): Client<Transport<BatchLensTransportType>> {
-  const base = createHttpTransport(options.rpcUrl, options.rpcUrlFallback)
+  const chain = withDlcFacts(options.chain)
   return createPublicClient({
-    chain: options.chain,
-    transport: deployless(base, { gasLimit: DEPLOYLESS_GAS_LIMIT })
+    chain,
+    transport: createDeploylessTransport({
+      chainId: chain.id,
+      rpcUrl: options.rpcUrl,
+      rpcUrlFallback: options.rpcUrlFallback,
+      batchSize: maxBatchSize(options.env ?? process.env)
+    })
   })
 }
 

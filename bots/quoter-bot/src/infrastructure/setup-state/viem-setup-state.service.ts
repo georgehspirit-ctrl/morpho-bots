@@ -11,7 +11,8 @@ import type { BookSetup, SetupStateService } from '../../application/setup/setup
 import type { SupportedChainId } from '../../config/supported-chains.utils'
 import type { JsonRequest } from './http-json.utils'
 
-import { ratifierRuntimeHash, referenceLookbackBlocks } from '../../config/supported-chains.utils'
+import { ratifierRuntimeHash, supportedChain } from '../../config/supported-chains.utils'
+import { findBlockAtOrBefore } from '../historical-block.utils'
 import { ProviderPaginationError } from './provider-pagination.error'
 import { executeProviderRead } from './provider-read.utils'
 import { ProviderResponseError } from './provider-response.error'
@@ -474,21 +475,23 @@ export class ViemSetupStateService implements SetupStateService {
         'reference RPC latest block has no number'
       )
     }
-    const lookback = referenceLookbackBlocks(
-      this.options.chainId,
-      this.options.referenceLookbackSeconds
-    )
-    if (latest.number < lookback) {
+    const historical = await findBlockAtOrBefore({
+      latest: { number: latest.number, timestamp: latest.timestamp },
+      target: latest.timestamp - this.options.referenceLookbackSeconds,
+      getBlock: blockNumber =>
+        executeProviderRead('archive-rpc', 'reference-historical-block', () =>
+          this.reference.getBlock({ blockNumber })
+        ),
+      blockTimeMs: supportedChain(this.options.chainId).blockTime
+    })
+    if (historical === undefined) {
       throw new ProviderResponseError(
         'archive-rpc',
         'reference-history',
         'reference RPC has insufficient history'
       )
     }
-    const historicalBlock = latest.number - lookback
-    await executeProviderRead('archive-rpc', 'reference-historical-block', () =>
-      this.reference.getBlock({ blockNumber: historicalBlock })
-    )
+    const historicalBlock = historical.number
     const [paramsResponse, marketResponse, latestMarketResponse] = await Promise.all([
       executeProviderRead('archive-rpc', 'reference-market-params', () =>
         this.reference.readContract({

@@ -5,7 +5,7 @@ import { tryCatch } from '@repo/utils'
 import { isAddressEqual } from 'viem'
 
 import type { Reallocation, ReallocationAction, Strategy } from '../strategies'
-import type { VaultV2Data } from '../vault-data'
+import type { VaultV2Data, VaultV2Result } from '../vault-data'
 
 export type TickDeps = {
   vaults: Address[]
@@ -16,7 +16,14 @@ export type TickDeps = {
    * skips the vault with an actionable `adapter.changed` instead (restart to re-pin).
    */
   expectedAdapter: (vault: Address) => Address | undefined
-  fetchVault: (vault: Address, blockNumber: bigint) => Promise<VaultV2Data>
+  /**
+   * One deployless read covering every eligible vault. Keyed by lower-cased vault address; each
+   * entry is either that vault's snapshot or the reason it alone is unusable.
+   */
+  fetchVaults: (
+    vaults: readonly Address[],
+    blockNumber: bigint
+  ) => Promise<Map<string, VaultV2Result>>
   strategy: Strategy
   encodeReallocation: (vaultData: VaultV2Data, reallocation: Reallocation) => Hex
   simulate: (vault: Address, data: Hex) => Promise<SimulateResult>
@@ -67,9 +74,11 @@ const summarize = (reallocation: Reallocation) => [
   ...reallocation.allocations.map(leg => legSummary('allocate', leg))
 ]
 
-const processVault = async (deps: TickDeps, vault: Address): Promise<VaultCounters> => {
-  const vaultData = await deps.fetchVault(vault, deps.chainHead)
-
+const processVault = async (
+  deps: TickDeps,
+  vault: Address,
+  vaultData: VaultV2Data
+): Promise<VaultCounters> => {
   // Strict `isAllocator(eoa)`, read in the snapshot's single call (see {@link VaultV2Data}); a
   // vault the EOA cannot reallocate is skipped, and resumes on its own once the role is granted.
   if (!vaultData.isAllocator) {
@@ -124,26 +133,66 @@ const processVault = async (deps: TickDeps, vault: Address): Promise<VaultCounte
 }
 
 /**
- * One reallocation pass: every whitelisted vault is processed concurrently — skip if a tx is in
- * flight, fetch a block-pinned snapshot (one deployless `eth_call`, allocator bit included), skip
- * (loudly) if the EOA lacks the role or the vault's adapter changed since startup, run the
- * strategy, simulate the exact multicall bytes, and submit (or dry-run-log) on sim-ok. A failure in
- * one vault logs `vault.error` and never blocks the others; counters are folded after every vault
- * settles and closed by one wide `tick.end` line.
+ * One reallocation pass: in-flight vaults are dropped, the rest are read in ONE block-pinned
+ * deployless call (allocator bit included), then processed concurrently — skip (loudly) if the EOA
+ * lacks the role or the vault's adapter changed since startup, run the strategy, simulate the exact
+ * multicall bytes, and submit (or dry-run-log) on sim-ok. A failure in one vault logs `vault.error`
+ * and never blocks the others; counters are folded after every vault settles and closed by one wide
+ * `tick.end` line.
+ *
+ * The read is batched, so unlike the per-vault work it is a single point of failure: a rejected
+ * request costs every vault this pass rather than one, and the interval gate means the retry is the
+ * next reallocation interval rather than the next block. That is the trade for N-1 fewer round trips
+ * and N-1 fewer deployless deploys; the failure is fanned out below so the counters and `vault.error`
+ * lines still read per vault.
  */
 export const runTick = async (deps: TickDeps): Promise<void> => {
   const started = Date.now()
   const inflight = deps.inflightLabels()
 
+  // Filtered BEFORE the read, not per vault after it: an in-flight vault should not be paid for.
+  const eligible = deps.vaults.filter(vault => {
+    if (!inflight.has(vault)) return true
+    deps.logger.debug('vault.inflight', { vault })
+    return false
+  })
+  const skippedInflight = deps.vaults.length - eligible.length
+
+  const snapshot = await tryCatch(
+    eligible.length === 0
+      ? Promise.resolve(new Map<string, VaultV2Result>())
+      : deps.fetchVaults(eligible, deps.chainHead)
+  )
+  if (snapshot.error) {
+    // One rejection yields no rows at all, so the per-vault lines have to be emitted explicitly or
+    // the tick would close having silently done nothing for the whole whitelist.
+    const reason = deps.revertReason(snapshot.error)
+    for (const vault of eligible) deps.logger.error('vault.error', { vault, reason })
+    deps.logger.info('tick.end', {
+      blockNumber: deps.chainHead,
+      vaults: deps.vaults.length,
+      ...NO_COUNTS,
+      skipped_inflight: skippedInflight,
+      errors: eligible.length,
+      duration_ms: Date.now() - started
+    })
+    return
+  }
+
   // The mapper cannot reject — `processVault` is wrapped in `tryCatch` and every branch returns a
   // counter set — so `Promise.all` never short-circuits a vault.
   const results = await Promise.all(
-    deps.vaults.map(async (vault): Promise<VaultCounters> => {
-      if (inflight.has(vault)) {
-        deps.logger.debug('vault.inflight', { vault })
-        return { ...NO_COUNTS, skipped_inflight: 1 }
+    eligible.map(async (vault): Promise<VaultCounters> => {
+      const result = snapshot.data.get(vault.toLowerCase())
+      if (!result) {
+        deps.logger.error('vault.error', { vault, reason: 'lens returned no row for this vault' })
+        return { ...NO_COUNTS, errors: 1 }
       }
-      const { data, error } = await tryCatch(processVault(deps, vault))
+      if (result.error) {
+        deps.logger.error('vault.error', { vault, reason: deps.revertReason(result.error) })
+        return { ...NO_COUNTS, errors: 1 }
+      }
+      const { data, error } = await tryCatch(processVault(deps, vault, result.data))
       if (error) {
         deps.logger.error('vault.error', { vault, reason: deps.revertReason(error) })
         return { ...NO_COUNTS, errors: 1 }
@@ -159,6 +208,7 @@ export const runTick = async (deps: TickDeps): Promise<void> => {
     },
     { ...NO_COUNTS }
   )
+  counters.skipped_inflight += skippedInflight
 
   deps.logger.info('tick.end', {
     blockNumber: deps.chainHead,

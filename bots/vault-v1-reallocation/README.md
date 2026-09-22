@@ -112,6 +112,7 @@ value on the service.
 | `CHAIN_ID`                                                | yes      | —           | 1 or 8453                                                |
 | `RPC_URL`                                                 | yes      | —           | reads, simulation, sends                                 |
 | `RPC_URL_FALLBACK`                                        | no       | —           | failover endpoint                                        |
+| `MAX_DEPLOYLESS_BATCH_SIZE`                               | no       | —           | Caps one chunk's `eth_call` data in bytes                |
 | `REALLOCATOR_PRIVATE_KEY`                                 | yes      | —           | allocator EOA                                            |
 | `VAULT_WHITELIST`                                         | yes      | —           | comma-separated vault addresses; deduplicated, non-empty |
 | `STRATEGY`                                                | no       | `apy-range` | or `equalize-utilizations`                               |

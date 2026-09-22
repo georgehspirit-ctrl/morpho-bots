@@ -203,7 +203,7 @@ describe('OfferInvalidationService', () => {
     const { service, port } = subject()
     port.invalidate = async (_groupId, observer) => {
       await observer?.(txA)
-      throw new OfferInvalidationAdapterError('receipt')
+      throw new OfferInvalidationAdapterError('transaction')
     }
 
     const error = await service.run({ groupId: groupA }).catch(value => value)

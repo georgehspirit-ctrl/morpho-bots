@@ -111,6 +111,7 @@ docker-compose and the Railway deploy script):
 | `CHAIN_ID`                                                | yes      | —                       | 1 or 8453                                            |
 | `RPC_URL`                                                 | yes      | —                       | reads, simulation, sends                             |
 | `RPC_URL_FALLBACK`                                        | no       | —                       | failover endpoint                                    |
+| `MAX_DEPLOYLESS_BATCH_SIZE`                               | no       | —                       | Caps one chunk's `eth_call` data in bytes            |
 | `REALLOCATOR_PRIVATE_KEY`                                 | yes      | —                       | allocator EOA                                        |
 | `VAULT_WHITELIST`                                         | yes      | —                       | comma-separated VaultV2 addresses; must be non-empty |
 | `STRATEGY`                                                | no       | `equalize-utilizations` | or `apy-range`                                       |

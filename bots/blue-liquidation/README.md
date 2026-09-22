@@ -34,7 +34,8 @@ Env vars (fail-loud on a missing required var, an unknown chain, or a malformed 
 | ------------------------------------------------------------------- | -------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `CHAIN_ID`                                                          | yes      | —                                | Must be in the chain map (`8453`, `4663`)                                                                                             |
 | `RPC_URL`                                                           | yes      | —                                | Primary RPC (reads, simulation, sends)                                                                                                |
-| `RPC_URL_FALLBACK`                                                  | no       | —                                | Optional viem-dlc `failover` endpoint                                                                                                 |
+| `RPC_URL_FALLBACK`                                                  | no       | —                                | Optional viem-dlc `failover` endpoint; each branch states its own `eth_call` gas cap                                                  |
+| `MAX_DEPLOYLESS_BATCH_SIZE`                                         | no       | —                                | Caps one chunk's `eth_call` data in bytes. Only set it when an endpoint rejects large requests                                        |
 | `LIQUIDATOR_PRIVATE_KEY`                                            | yes      | —                                | EOA hex key (`0x` + 32-byte hex)                                                                                                      |
 | `EXECUTOOOR_ADDRESS`                                                | no       | derived                          | Override; default is the derived CREATE2 address                                                                                      |
 | `MORPHO_API_URL`                                                    | no       | `https://api.morpho.org/graphql` | GraphQL endpoint for borrower discovery                                                                                               |
@@ -308,10 +309,11 @@ per tick (`discover.*`, `lens.read`, `tick.end`, `tick.error`, `block.new`), per
 
 - **Broadcast path**: use an RPC that relays. `rpc.morpho.dev/realtime` acks sends but never relays,
   which strands the nonce cursor.
-- **Lens gas model** (`state/lens.sol.ts` `BatchGasConfig`) is **measured** — `~150k + 33k·N` plus a
-  ~750k deployless-CREATE constant, fit on an anvil fork of Base against real discovered pairs (method
-  documented at the config). Re-measure the same way if the lens body changes materially. Any residual
-  under-budget is self-correcting (viem-dlc's chunker halve-and-retries an over-cap batch).
+- **Lens gas model** is currently **unset**, deliberately. Nothing about it is load-bearing: a chunk
+  resizes from what its own pages report, so stating nothing costs continuation round trips and never
+  a result — while a model viem-dlc rejects as malformed is ignored silently in favour of packing by
+  bytes, which is worse than stating nothing. Populate `batch.gas` from the wide event's `fixed_gas`,
+  `item_gas_avg` and `item_gas_stddev` once real traffic has been observed; do not guess.
 - **Discovery health**: at boot the bot logs `discovery.startup` with this chain's candidate count
   and a parsed `MarketParams` sample (or `discovery.startup_error` with the API message). On Railway,
   grep those first, then per tick: `discover.error` (transient API failure — the tick proceeds with

@@ -2,6 +2,7 @@ import type { MonitorOperationQueue } from '@repo/monitoring'
 import type { Hex } from 'viem'
 
 import { cycleHasFailure, cycleRequiresHalt, waitForMonitorInterval } from '@repo/monitoring'
+import { withActiveSpan } from '@repo/telemetry'
 import { zeroFloorSub } from '@repo/utils'
 
 import type {
@@ -12,6 +13,7 @@ import type {
   BootstrapRate,
   PositionBootstrapDecision
 } from '../../domain/bootstrap/position-bootstrap'
+import type { OperatorAdapterOperation } from '../operator-error-name.utils'
 import type {
   BootstrapMakeResult,
   BootstrapSubmittedTransaction,
@@ -171,7 +173,7 @@ type BootstrapRunOutcome =
       invalidated: boolean
       invalidationLogged?: boolean
       errorName: string
-      adapterOperation?: string
+      adapterOperation?: OperatorAdapterOperation
       minimumAssets?: string
       invalidationErrorName?: string
       ownershipCleanupErrorName?: string
@@ -184,7 +186,7 @@ type BootstrapRunOutcome =
       strategyInvalidated: boolean
       strategyInvalidationLogged?: boolean
       errorName: string
-      adapterOperation?: string
+      adapterOperation?: OperatorAdapterOperation
       invalidationErrorName?: string
     }
   | {
@@ -321,9 +323,16 @@ export class PositionBootstrapService {
           await parameters.onCycle?.(results)
           return results
         }
-        const results = parameters.runOperation
-          ? await parameters.runOperation(runCycle)
-          : await runCycle()
+        // The span wraps the enqueue, so wait behind the shared mutation queue is traced.
+        const results = await withActiveSpan(
+          {
+            name: 'quoter-bot.cycle',
+            attributes: { workflow: 'bootstrap' },
+            errorName: operatorErrorName,
+            failed: cycle => cycle !== undefined && cycleHasFailure(cycle)
+          },
+          () => (parameters.runOperation ? parameters.runOperation(runCycle) : runCycle())
+        )
         if (results === undefined) break
         cycles += 1
 

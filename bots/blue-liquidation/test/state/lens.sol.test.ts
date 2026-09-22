@@ -14,17 +14,19 @@ describe('BlueLiquidationLens', () => {
     expect(compiled.factory).toMatch(/^0x[0-9a-fA-F]{40}$/)
   })
 
-  it('exposes a single-array-in / single-array-out lens entrypoint', () => {
-    // The struct shape is what lets viem encode/decode natively (no hand-written ABI). It also
-    // guards the backtick-truncation footgun: a stray backtick in a Solidity comment terminates the
-    // sol``` template early, silently yielding an empty ABI — this would then find no `lens`.
+  it('exposes a single-element-in / single-value-out per-item entrypoint', () => {
+    // viem-dlc's envelope calls ONE element at a time, so the entrypoint takes a single tuple and
+    // returns a single tuple — `arrayifiedAbi` derives the array-shaped wire fragment from it. This
+    // also guards the backtick-truncation footgun: a stray backtick in a Solidity comment terminates
+    // the sol``` template early, silently yielding an empty ABI — this would then find no entrypoint.
     const { abi } = BlueLiquidationLens.with(MORPHO)
-    const lens = abi.find(item => item.type === 'function' && item.name === 'lens')
+    const lens = abi.find(item => item.type === 'function' && item.name === 'computeOne')
     expect(lens).toBeDefined()
     expect(lens?.inputs).toHaveLength(1)
-    expect(lens?.inputs[0]?.type).toBe('tuple[]')
+    expect(lens?.inputs[0]?.type).toBe('tuple')
     expect(lens?.outputs).toHaveLength(1)
-    expect(lens?.outputs[0]?.type).toBe('tuple[]')
+    expect(lens?.outputs[0]?.type).toBe('tuple')
+    expect(lens?.stateMutability).toBe('view')
   })
 
   it('round-trips a raw LensOut through the soltag-generated ABI in field order', () => {
@@ -44,8 +46,8 @@ describe('BlueLiquidationLens', () => {
       collateralPrice: 10n ** 36n,
       lltv: 860000000000000000n
     }
-    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: [sample] })
-    const decoded = decodeFunctionResult({ abi, functionName: 'lens', data: encoded })
-    expect(decoded).toEqual([sample])
+    const encoded = encodeFunctionResult({ abi, functionName: 'computeOne', result: sample })
+    const decoded = decodeFunctionResult({ abi, functionName: 'computeOne', data: encoded })
+    expect(decoded).toEqual(sample)
   })
 })

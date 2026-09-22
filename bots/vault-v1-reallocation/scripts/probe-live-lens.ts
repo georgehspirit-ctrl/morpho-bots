@@ -25,7 +25,7 @@ import { getAddress } from 'viem'
 import { getBlock, getBlockNumber, readContract } from 'viem/actions'
 import { base, mainnet } from 'viem/chains'
 
-import { fetchVaultData } from '../src/vault-data'
+import { fetchVaults } from '../src/vault-data'
 import { InvalidProbeConfigError } from './invalid-probe-config.error'
 
 const CHAINS = { [mainnet.id]: mainnet, [base.id]: base }
@@ -79,7 +79,9 @@ async function main() {
 
   // (1) The production read path: one deployless eth_call.
   const lensStart = Date.now()
-  const lensData = await fetchVaultData(client, vault, { chainId, blockNumber, eoa })
+  const lensRows = await fetchVaults(client, [vault], { chainId, blockNumber, eoa })
+  const lensData = lensRows.get(vault.toLowerCase())
+  if (!lensData) throw new Error(`lens returned no row for ${vault}`)
   const lensMs = Date.now() - lensStart
 
   // (2) The path the lens replaced, pinned to the same block and accrued to its timestamp.

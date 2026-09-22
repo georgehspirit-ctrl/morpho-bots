@@ -2,6 +2,7 @@ import { decodeFunctionResult, encodeFunctionResult, getAddress, parseUnits } fr
 import { describe, expect, it } from 'vitest'
 
 import { VaultV1ReallocationLens } from '../../src/state/lens.sol'
+import { VaultV1AccrualReferenceLens } from '../fork/reference-lens.sol'
 
 const MORPHO = getAddress('0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb')
 const ADAPTIVE_CURVE_IRM = getAddress('0x46415998764C29aB2a25CbeA6254146D50D22687')
@@ -20,7 +21,7 @@ describe('VaultV1ReallocationLens', () => {
     expect(lens.factoryData.toLowerCase()).toContain(ADAPTIVE_CURVE_IRM.slice(2).toLowerCase())
   })
 
-  it('exposes a single-array-in / single-array-out lens entrypoint', () => {
+  it('exposes a single-element-in / single-value-out per-item entrypoint', () => {
     // The struct shape is what lets viem encode/decode natively (no hand-written ABI). It also
     // guards the backtick-truncation footgun: a stray backtick in a Solidity comment terminates the
     // sol``` template early, silently yielding an empty ABI — this would then find no `lens`.
@@ -28,15 +29,25 @@ describe('VaultV1ReallocationLens', () => {
     const lens = abi.find(item => item.type === 'function' && item.name === 'lens')
     expect(lens).toBeDefined()
     expect(lens?.inputs).toHaveLength(1)
-    expect(lens?.inputs[0]?.type).toBe('tuple[]')
+    expect(lens?.inputs[0]?.type).toBe('tuple')
     expect(lens?.outputs).toHaveLength(1)
-    expect(lens?.outputs[0]?.type).toBe('tuple[]')
+    expect(lens?.outputs[0]?.type).toBe('tuple')
   })
 
-  it('declares the entrypoint state-changing, since it accrues interest on-chain', () => {
-    // The accrual is the whole point of the lens — if this ever reads `view`, the `accrueInterest`
-    // call was dropped and the snapshot silently reverted to pre-accrual state.
+  it('declares the entrypoint view, as the deployless envelope requires', () => {
+    // viem-dlc dispatches each element with STATICCALL, so a `nonpayable` entrypoint would revert
+    // every element into `skipped` rather than returning data. This guards the whole read-only
+    // accrual projection: if a state-changing call creeps back in, this flips first.
     const { abi } = compiled()
+    const lens = abi.find(item => item.type === 'function' && item.name === 'lens')
+    expect(lens?.stateMutability).toBe('view')
+  })
+
+  it('keeps the accrual reference lens state-changing, so it stays an independent oracle', () => {
+    // The fork equivalence test diffs the projection against this fixture. Its value is that Blue
+    // performs the accrual, which requires the state-changing `accrueInterest` — so if someone
+    // "fixes" it to view, the gate silently starts comparing the projection against itself.
+    const { abi } = VaultV1AccrualReferenceLens.with(MORPHO, ADAPTIVE_CURVE_IRM)
     const lens = abi.find(item => item.type === 'function' && item.name === 'lens')
     expect(lens?.stateMutability).toBe('nonpayable')
   })
@@ -61,16 +72,19 @@ describe('VaultV1ReallocationLens', () => {
             lltv: parseUnits('0.86', 18)
           },
           totalSupplyAssets: parseUnits('1000000', 6),
+          totalSupplyShares: parseUnits('1000000', 12),
           totalBorrowAssets: parseUnits('900000', 6),
           cap: parseUnits('5000000', 6),
           vaultAssets: parseUnits('250000', 6),
-          rateAtTarget: 951293759n
+          rateAtTargetStored: 951293759n,
+          utilizationBefore: parseUnits('0.9', 18),
+          elapsed: 3600n
         }
       ]
     }
-    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: [sample] })
+    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: sample })
     const decoded = decodeFunctionResult({ abi, functionName: 'lens', data: encoded })
-    expect(decoded).toEqual([sample])
+    expect(decoded).toEqual(sample)
   })
 
   it('decodes an empty withdraw queue as a vault with no markets', () => {
@@ -83,7 +97,7 @@ describe('VaultV1ReallocationLens', () => {
       isAllocator: false,
       markets: []
     }
-    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: [sample] })
-    expect(decodeFunctionResult({ abi, functionName: 'lens', data: encoded })).toEqual([sample])
+    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: sample })
+    expect(decodeFunctionResult({ abi, functionName: 'lens', data: encoded })).toEqual(sample)
   })
 })

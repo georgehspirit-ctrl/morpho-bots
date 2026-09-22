@@ -37,11 +37,17 @@ const makeLensMarket = (
       lltv: parseUnits('0.8', 18)
     },
     totalSupplyAssets: parseUnits('100000', 6),
+    totalSupplyShares: parseUnits('100000', 12),
     totalBorrowAssets: parseUnits('50000', 6),
     cap: caps(100n),
     collateralCap: caps(200n),
     vaultAssets: parseUnits('10000', 6),
-    rateAtTarget: parseUnits('0.03', 18) / (365n * 24n * 60n * 60n),
+    rateAtTargetStored: parseUnits('0.03', 18) / (365n * 24n * 60n * 60n),
+    utilizationBefore: parseUnits('0.5', 18),
+    // `elapsed: 0` keeps `advanceRateAtTarget` an identity here, so these fixtures assert on the
+    // stored rate exactly as they did before the read-only projection. The advance itself has its
+    // own test below.
+    elapsed: 0n,
     ...overrides
   }
 }
@@ -126,13 +132,13 @@ describe('toVaultV2Data', () => {
     const foreignIrm = makeLensMarket({
       params: { ...makeLensMarket().params, irm: getAddress(`0x${'40'.repeat(20)}`) }
     })
-    const zeroRate = makeLensMarket({ rateAtTarget: 0n })
+    const zeroRate = makeLensMarket({ rateAtTargetStored: 0n })
     const idle = makeLensMarket({
       params: {
         ...makeLensMarket().params,
         collateralToken: '0x0000000000000000000000000000000000000000'
       },
-      rateAtTarget: 0n
+      rateAtTargetStored: 0n
     })
     const data = toVaultV2Data(
       VAULT,

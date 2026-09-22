@@ -3,6 +3,7 @@ import type { BatchLensTransportType } from '@repo/utils'
 import type { Address, Client, Hex, Transport } from 'viem'
 
 import { getChainAddresses } from '@morpho-org/blue-sdk'
+import { advanceRateAtTarget } from '@repo/utils'
 import { getAddress, isAddressEqual, zeroAddress } from 'viem'
 
 import type { LensVaultOut } from './state/lens.sol'
@@ -111,8 +112,9 @@ export const toVaultV2Data = (vault: Address, row: LensVaultOut, chainId: number
   }
   const adapterAddress = getAddress(qualifying[0]!.adapter)
 
-  const marketsData = row.markets.map(
-    (market): VaultV2MarketData => ({
+  const marketsData = row.markets.map((market): VaultV2MarketData => {
+    const rateAtTarget = advanceRateAtTarget(market)
+    return {
       id: market.id,
       capId: market.capId,
       params: market.params,
@@ -122,11 +124,11 @@ export const toVaultV2Data = (vault: Address, row: LensVaultOut, chainId: number
       },
       cap: toCapState(market.cap),
       vaultAssets: market.vaultAssets,
-      rateAtTarget: market.rateAtTarget,
-      isAdaptiveCurve: isAdaptiveCurveMarket(market.params.irm, market.rateAtTarget, chainId),
+      rateAtTarget,
+      isAdaptiveCurve: isAdaptiveCurveMarket(market.params.irm, rateAtTarget, chainId),
       isIdle: isAddressEqual(market.params.collateralToken, zeroAddress)
-    })
-  )
+    }
+  })
 
   // Markets sharing a collateral share one cap id; the lens reports the triple per market, so the
   // duplicates collapse to identical values here.
@@ -153,7 +155,7 @@ export const toVaultV2Data = (vault: Address, row: LensVaultOut, chainId: number
 }
 
 /**
- * Reads one VaultV2's full reallocation input — factory identity, the EOA's allocator bit, idle
+ * Reads EVERY given VaultV2's full reallocation input — factory identity, the EOA's allocator bit, idle
  * balance, adapter set, and per-market Blue state, position, `rateAtTarget`, and all three cap
  * levels — in a single deployless `eth_call` pinned to `blockNumber`, so the snapshot is coherent
  * across markets and reproducible. The lens accrues each market on-chain inside that call, so there
@@ -163,11 +165,11 @@ export const toVaultV2Data = (vault: Address, row: LensVaultOut, chainId: number
  * {@link toVaultV2Data}); a revert inside the lens propagates as-is. The tick catches per vault
  * either way.
  */
-export const fetchVaultV2Data = async (
+export const fetchVaults = async (
   client: Client<Transport<BatchLensTransportType>>,
-  vault: Address,
+  vaults: readonly Address[],
   { chainId, blockNumber, eoa }: { chainId: number; blockNumber: bigint; eoa: Address }
-): Promise<VaultV2Data> => {
+): Promise<Map<string, VaultV2Result>> => {
   const {
     morpho,
     adaptiveCurveIrm,
@@ -185,9 +187,34 @@ export const fetchVaultV2Data = async (
       marketV1AdapterFactory: morphoMarketV1AdapterFactory ?? zeroAddress,
       marketV1AdapterV2Factory: morphoMarketV1AdapterV2Factory ?? zeroAddress
     },
-    [{ vault, eoa }],
+    vaults.map(vault => ({ vault, eoa })),
     blockNumber
   )
-  // `readDeploylessBatchLens` already validates one output row per input, so the key is present.
-  return toVaultV2Data(vault, rows.get(vault.toLowerCase())!, chainId)
+
+  // Converted PER ROW, inside its own try: `toVaultV2Data` rejects a non-VaultV2 address and an
+  // unsupported adapter shape, and one such vault in the whitelist must not reject the batch for
+  // every other vault. The error is carried rather than thrown so the tick can attribute it.
+  const out = new Map<string, VaultV2Result>()
+  for (const vault of vaults) {
+    const row = rows.get(vault.toLowerCase())
+    if (!row) continue
+    const { data, error } = tryCatchSync(() => toVaultV2Data(vault, row, chainId))
+    out.set(vault.toLowerCase(), error ? { error } : { data })
+  }
+  return out
+}
+
+/** One vault's outcome: either its converted snapshot, or why this vault alone is unusable. */
+export type VaultV2Result =
+  | { data: VaultV2Data; error?: undefined }
+  | { data?: undefined; error: Error }
+
+function tryCatchSync<T>(
+  fn: () => T
+): { data: T; error?: undefined } | { data?: undefined; error: Error } {
+  try {
+    return { data: fn() }
+  } catch (error) {
+    return { error: error instanceof Error ? error : new Error(String(error)) }
+  }
 }

@@ -25,17 +25,40 @@ const KNOWN_NAMES = [
   'QuoterBotMonitorHaltedError',
   'TypeError',
   'RangeError',
-  'URIError'
+  'URIError',
+  'HttpRequestError',
+  'TimeoutError',
+  'RpcRequestError',
+  'LimitExceededRpcError',
+  'InternalRpcError',
+  'ResourceNotFoundRpcError',
+  'ResourceUnavailableRpcError',
+  'InvalidParamsRpcError',
+  'MethodNotSupportedRpcError',
+  'UnknownRpcError',
+  'BlockNotFoundError',
+  'CallExecutionError',
+  'ContractFunctionExecutionError',
+  'ContractFunctionRevertedError',
+  'ContractFunctionZeroDataError',
+  'ChainMismatchError'
 ] as const
 
-// Every BootstrapAdapterError operation is a bot-authored literal, but the field is typed `string`,
-// so it is allowlisted rather than passed through: an operator-visible dimension must never be able
-// to carry provider text. Keep in sync with the `new BootstrapAdapterError(...)` call sites.
 const ADAPTER_OPERATIONS = [
+  'batch-transaction',
+  'book-response',
+  'book-timeout',
+  'configuration',
   'cross-book-evidence-missing',
+  'empty-ladder',
   'group-consumption-read',
   'group-ownership-state',
+  'latest-block',
+  'market-configuration-missing',
   'market-continuous-fee',
+  'market-matured',
+  'market-not-configured',
+  'maturity-read',
   'mempool-validation',
   'mempool-validation-after-ratification',
   'missing-owned-group-intent',
@@ -45,29 +68,52 @@ const ADAPTER_OPERATIONS = [
   'offer-groups-maker',
   'offer-groups-page-limit',
   'offer-groups-page-size',
+  'offer-groups-read',
   'offer-groups-repeated-cursor',
   'offer-groups-response',
   'offer-groups-timeout',
+  'ownership-cleanup',
   'position-unavailable',
+  'preflight',
   'prospective-offer-missing',
   'publication-after-ratification',
   'publication-reservation-cleanup',
+  'publication-reservation-missing',
   'publication-transaction-reverted-after-ratification',
   'rate-window-empty',
+  'ratifier-signature',
+  'ratifier-transaction-reverted',
+  'readonly-mutation',
+  'reconciliation-required',
   'reference-checkpoint',
+  'reference-history',
   'reference-rate',
   'reference-stale',
+  'reference-uninitialized',
+  'removed-market-cleanup',
   'requirement-signing-policy',
   'retained-group-metadata-refresh',
   'shared-group-reconciliation',
   'signer-identity-mismatch',
+  'simulation-reverted',
+  'submission-refused',
   'target-rate-strategy-missing',
+  'transaction',
+  'transaction-dropped',
+  'transaction-pending',
   'transaction-policy',
-  'unexpected-requirement'
+  'transaction-reverted',
+  'unexpected-requirement',
+  'unknown-pending-nonce',
+  'unsupported-ratifier'
 ] as const
 
-/** Stable operator-visible adapter failure reasons safe to use as a grouping dimension. */
-type OperatorAdapterOperation = (typeof ADAPTER_OPERATIONS)[number]
+/**
+ * Stable operator-visible adapter failure reasons safe to use as a grouping dimension.
+ * @remarks Adapter error constructors take this type, so a new reason must be listed here before it
+ * can be thrown; that is what keeps the shipped `adapterOperation` free of provider text.
+ */
+export type OperatorAdapterOperation = (typeof ADAPTER_OPERATIONS)[number]
 
 const adapterOperations: ReadonlySet<string> = new Set(ADAPTER_OPERATIONS)
 

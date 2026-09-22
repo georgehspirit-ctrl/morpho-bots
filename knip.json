@@ -21,6 +21,7 @@
     "packages/logging": {},
     "packages/monitoring": {},
     "packages/observability": {},
+    "packages/telemetry": {},
     "packages/offers": {},
     "packages/swaps": {},
     "bots/midnight-liquidation": {
@@ -35,10 +36,12 @@
       "entry": ["src/index.ts", "scripts/probe-live-lens.ts"]
     },
     "bots/vault-v1-reallocation": {
-      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"]
+      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"],
+      "ignoreDependencies": ["@repo/contracts"]
     },
     "bots/vault-v2-reallocation": {
-      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"]
+      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"],
+      "ignoreDependencies": ["@repo/contracts"]
     },
     "bots/midnight-crossed-books": {
       "ignore": ["src/infrastructure/*/generated/**"]

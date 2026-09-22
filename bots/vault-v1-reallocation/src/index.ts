@@ -9,6 +9,7 @@ import {
   createLogger,
   createPendingQueue,
   createRunner,
+  withLogging,
   createSigner,
   DEFAULT_MAX_DATA_BYTES,
   DEFAULT_MAX_GAS_LIMIT,
@@ -25,7 +26,7 @@ import { revertReason } from './revert.utils'
 import { runTick } from './runner/tick'
 import { createStrategy } from './strategies'
 import { checkVaults } from './vault-checks'
-import { fetchVaultData } from './vault-data'
+import { fetchVaults } from './vault-data'
 
 // Blocks a vault stays in the queue's backpressure set AFTER its tx settles, suppressing an
 // immediate re-plan from a read RPC that lags the send RPC's confirmation.
@@ -141,8 +142,14 @@ async function main() {
       vaults: config.vaultWhitelist,
       chainHead,
       eoa,
-      fetchVault: (vault, blockNumber) =>
-        fetchVaultData(client, vault, { chainId: config.chainId, blockNumber, eoa }),
+      fetchVaults: (vaults, blockNumber) =>
+        withLogging(
+          () => fetchVaults(client, vaults, { chainId: config.chainId, blockNumber, eoa }),
+          {
+            logger: logger.layer,
+            lens: 'vault-v1-reallocation'
+          }
+        ),
       strategy,
       encodeReallocate: allocations => MetaMorphoAction.reallocate(allocations),
       // Byte-for-byte what gets broadcast. A revert here — role revoked, cap exceeded, inconsistent

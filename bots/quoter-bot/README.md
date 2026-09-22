@@ -475,6 +475,8 @@ unit; for six-decimal USDC, `101000000` is 101 USDC. No value is inferred from a
 | `BETTERSTACK_SOURCE_TOKEN`          | —                                     | Optional Better Stack source token. Must be set together with `BETTERSTACK_INGESTING_HOST`; partial configuration emits `logship.misconfigured` and ships nothing.                                                                                                                                                                                           |
 | `BETTERSTACK_INGESTING_HOST`        | —                                     | Optional Better Stack ingest host, with or without an `https://` prefix. Must be set together with `BETTERSTACK_SOURCE_TOKEN`.                                                                                                                                                                                                                               |
 | `BETTERSTACK_HEARTBEAT_URL`         | —                                     | Optional HTTP(S) heartbeat URL pinged at startup and once per minute. Invalid URLs and ping failures are reported safely and never interrupt quoter-bot.                                                                                                                                                                                                     |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`       | —                                     | Optional OTLP/HTTP base endpoint enabling OpenTelemetry trace and metric export. Unset disables telemetry entirely; the standard `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` variants enable one signal alone. The value may embed an access token and is never logged.                                                     |
+| `OTEL_EXPORTER_OTLP_HEADERS`        | —                                     | Optional comma-separated `key=value` request headers for the OTLP endpoint (typically authorization). Read by the exporter only and never logged.                                                                                                                                                                                                            |
 
 There is no separate Mempool endpoint or API-key field. Books and cursor-paginated maker offer groups
 are read through `MORPHO_API_BASE_URL`. Ratifier identity is validated from the pinned Morpho SDK
@@ -537,15 +539,15 @@ no field is human-scaled — resolve decimals downstream from the `loanAsset` ad
 | `bot.configured`               | Once per process start                                                                                    | `bootstrapIntervalSeconds`, `loanAsset`, `referenceMode`, `readOnly`                                                                                                                                                                                                   |
 | `market.configured`            | Once per configured market, at startup                                                                    | `marketId`, `ladder`, `bootstrap`, `ladderIntervalSeconds?`                                                                                                                                                                                                            |
 | `bot.failed`                   | A terminal failure stops the process                                                                      | `workflow?`, `reason`, `errorName?`                                                                                                                                                                                                                                    |
-| `cycle.completed`              | Every market of every setup/bootstrap/ladder cycle                                                        | `workflow`, `marketId?`, `status`, `stage?`, `action?`, `reason?`, `durationMs?`, `errorName?`                                                                                                                                                                         |
+| `cycle.completed`              | Every market of every setup/bootstrap/ladder cycle                                                        | `workflow`, `marketId?`, `status`, `stage?`, `action?`, `reason?`, `durationMs?`, `errorName?`, `adapterOperation?`                                                                                                                                                    |
 | `guardrail.rate-clamped`       | A cycle clamped rates to a bound (per side, count > 0)                                                    | `workflow`, `marketId`, `side?`, `clampedRungs`, `bound`, `minimumRateBps`, `maximumRateBps`                                                                                                                                                                           |
 | `guardrail.cross-book-cleared` | Own bootstrap-buy clearance repriced rungs during generation (per side, count > 0)                        | `workflow`, `marketId`, `side`, `clearedRungs`                                                                                                                                                                                                                         |
 | `guardrail.book-cleared`       | The opposing market book repriced rungs at publication (per side, count > 0)                              | `workflow`, `marketId`, `side`, `clearedRungs`                                                                                                                                                                                                                         |
 | `guardrail.book-crossed`       | A third party crosses the resting ladder on that side (per side, verbose cycles)                          | `workflow`, `marketId`, `side`, `clearable`, `suppressed`                                                                                                                                                                                                              |
 | `guardrail.exposure-capped`    | A bootstrap offer was reduced below its request                                                           | `workflow`, `marketId`, `requestedAssets`, `cappedAssets`, `cap`                                                                                                                                                                                                       |
 | `guardrail.rungs-truncated`    | Funded rungs are fewer than configured (per side)                                                         | `marketId`, `side`, `configuredRungs`, `fundedRungs`                                                                                                                                                                                                                   |
-| `guardrail.spread-rejected`    | The internal `adapterOperation` is `negative-spread` (not shipped)                                        | `marketId`                                                                                                                                                                                                                                                             |
-| `guardrail.halted`             | A cycle halted (offers pulled)                                                                            | `workflow`, `marketId?`, `stage`, `reason`, `strategyInvalidated`                                                                                                                                                                                                      |
+| `guardrail.spread-rejected`    | A bootstrap result's `adapterOperation` is `negative-spread`                                              | `marketId`                                                                                                                                                                                                                                                             |
+| `guardrail.halted`             | A cycle halted (offers pulled)                                                                            | `workflow`, `marketId?`, `stage`, `reason`, `strategyInvalidated`, `adapterOperation?`                                                                                                                                                                                 |
 | `reference.observed`           | A verbose cycle read the reference rate                                                                   | `workflow`, `marketId`, `referenceRateBps`, `targetRateBps?`                                                                                                                                                                                                           |
 | `position.observed`            | A verbose ladder cycle observed post-check market state                                                   | `marketId`, `cashBalanceAssets?`, `creditAssets?`, `otherMarketCreditAssets?`, `reservedAssets?`, `marketReservedAssets?`, `maturityTimestamp?`, `lowerRateCapacityAssets?`, `higherRateCapacityAssets?`, `targetMarketCapacityAssets?`, `maximumTotalCapacityAssets?` |
 | `bootstrap.progress`           | A verbose bootstrap cycle observed position state                                                         | `marketId`, `creditAssets`, `creditTargetAssets`                                                                                                                                                                                                                       |
@@ -557,8 +559,8 @@ no field is human-scaled — resolve decimals downstream from the `loanAsset` ad
 
 `txHash` and `groupId` are unbounded trace-only correlation fields: use them to join records, never
 as grouping dimensions. The safe dimensions are `workflow`, `marketId`, `side`, `status`, `stage`,
-`action`, `reason`, `check`, `bound`, `cap`, `operation`, `state`, `referenceMode`, and
-`guardrail.book-crossed`'s `clearable` and `suppressed`.
+`action`, `reason`, `check`, `bound`, `cap`, `operation`, `state`, `referenceMode`,
+`adapterOperation`, and `guardrail.book-crossed`'s `clearable` and `suppressed`.
 Guardrail records are aggregated per side per cycle and emitted only when the count is non-zero,
 because a side can hold up to 512 rungs and regenerate every second. Error text never ships — only
 allowlisted `errorName` classifications.
@@ -603,13 +605,94 @@ Absence alerts are scoped per market by `market.configured`, which names the mar
 - Monitoring cannot halt quoting. Records are derived and written inside the monitored cycle's own
   callback, but `writeCycle` swallows any failure raised while projecting or writing them: telemetry
   can be lost silently, and a broken projection can never stop a cycle.
-- Shutdown cleanup cancellations ship pre-receipt `ladder.transaction-submitted` /
-  `bootstrap.transaction-submitted` records but no `transaction.settled` counterpart: confirmed
-  hashes exist only on the terminal monitor report, which is not shipped. A failed cleanup remains
-  alertable as `bot.failed` with `reason: "cleanup-failed"`.
+- Shutdown cleanup cancellations and the explicit `invalidate` command ship pre-receipt
+  `*.transaction-submitted` records but no `transaction.settled` counterpart: confirmed hashes
+  exist only on terminal reports, which are not shipped, and `MonitoringWorkflow` has no
+  invalidation member for a contract-valid settled record. The `quoter_bot.transactions` metric
+  therefore pairs `submitted`/`settled` phases only for the `bootstrap` and `ladder` workflows —
+  `offer-invalidation` submissions are submitted-only by contract, not stuck. A failed cleanup
+  remains alertable as `bot.failed` with `reason: "cleanup-failed"`.
 - `cycle.completed.durationMs` covers one market's check including the post-check verbose re-read.
   Under the combined `start` lifecycle the ladder and bootstrap writers share one mutation queue, so
   it can include queue wait.
+
+### OpenTelemetry observability
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (or a signal-specific
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) to export traces and
+metrics over OTLP/HTTP with JSON encoding — TIB-2026-09-07 records the design. Telemetry follows
+the same contract as Better Stack shipping: strictly opt-in (unset means nothing is registered and
+no telemetry code runs), strictly best-effort (no export failure can interrupt or halt quoting),
+and strictly sanitized. It is configured independently of `BETTERSTACK_*`; either sink alone
+auto-enables the safe `--verbose` event stream for `start`, `bootstrap`, and `ladder`.
+
+**Traces.** Every setup/bootstrap/ladder cycle runs inside a `quoter-bot.cycle` span tagged
+`workflow`, and every outbound `fetch`/undici request (RPC and Morpho API calls) becomes a child
+client span via `diagnostics_channel` instrumentation, with the semconv
+`http.client.request.duration` histogram recorded alongside. Under the combined `start` lifecycle
+the cycle span begins at enqueue, so wait behind the shared bootstrap/ladder mutation queue is
+part of the span — per-market work time remains `cycle.completed.durationMs`, making contention
+the difference between the two. Every URL-bearing attribute (`url.full`, `server.address`, on
+spans and the duration metric alike) is reduced to a classified origin: path and query are
+dropped and subdomain labels collapse to `[redacted]` (some providers encode keys as hostname
+labels), keeping only the last two hostname labels, the scheme, and the port — IP literals and
+one- or two-label hosts pass through. Failures are sanitized the
+same way: a span processor strips every `exception` event and status message before export, so a
+failed request or cycle span carries only an error status plus low-cardinality classifications
+(`error.type`, the allowlisted `errorName`) — raw error text never reaches the exporter. A cycle
+whose result reports a handled failure — a `failed`/`halted` market result, a not-ready readiness
+report — carries the same error status, and one-shot `setup-check`, `bootstrap`, and `ladder`
+invocations wrap their single cycle in the same span and mirror their result into the same flat
+monitoring records for the sinks (never onto stdout, whose one-shot contract stays a single
+result), so trace and metric coverage match the monitors. Monitor and `start` service
+construction — the readiness preflight and removed-market cleanup that run before the first
+cycle — is traced as a `quoter-bot.startup` span. AWS KMS and quoter-signer Lambda calls use the AWS SDK's `node:http` stack, not
+undici, so they appear inside the cycle span's duration but not as child spans.
+
+**Metrics.** The `quoter_bot.*` instruments are derived from the same shipped monitoring records
+documented above, so the log stream and the metric stream can never disagree about what happened.
+Their attributes are restricted to the safe grouping dimensions listed above plus the derived
+`type` (guardrail event suffix) and `phase` (`submitted`/`settled`) discriminators; `txHash`,
+`groupId`, and `errorName` never become metric attributes. The semconv
+`http.client.request.duration` histogram is the one instrument outside that vocabulary, carrying
+the standard bounded HTTP client dimensions (method, status code, server address/port, URL
+scheme, class-of-error `error.type`) and never a path, query, or free-form text. `*_assets` and
+`*_bps` values are raw smallest-unit integers converted to floating point (magnitudes beyond 2^53
+lose precision but keep scale). The book `*_rate_bps` gauges exist only while that side is
+quoting: an empty side drops its rate data points rather than freezing the last published rate,
+so a rate reading always sits beside `quoter_bot.book.quoting = 1`. Position and reference gauges
+are last-observed values, refreshed by every verbose cycle that carries the field — an optional
+field absent from one record (for example `maturityTimestamp` with no indexed group) keeps its
+previous reading rather than being dropped, exactly like its log counterpart.
+
+| Instrument                                                             | Kind      | Source record                                                     |
+| ---------------------------------------------------------------------- | --------- | ----------------------------------------------------------------- |
+| `quoter_bot.cycles`                                                    | counter   | `cycle.completed`                                                 |
+| `quoter_bot.cycle.duration` (ms)                                       | histogram | `cycle.completed.durationMs`                                      |
+| `quoter_bot.failures`                                                  | counter   | `bot.failed`                                                      |
+| `quoter_bot.guardrail.events`                                          | counter   | `guardrail.*`, tagged `type`                                      |
+| `quoter_bot.transactions`                                              | counter   | `*.transaction-submitted` + `transaction.settled`, tagged `phase` |
+| `quoter_bot.transaction.lifecycle`                                     | counter   | `transaction.lifecycle`, tagged `state` and `reason`              |
+| `quoter_bot.offers.consumed` / `.consumed_assets`                      | counter   | `offer.consumed`                                                  |
+| `quoter_bot.setup.checks`                                              | counter   | `setup.check-failed` / `-warning`                                 |
+| `quoter_bot.reference.rate_bps` / `.target_rate_bps`                   | gauge     | `reference.observed`                                              |
+| `quoter_bot.position.*`                                                | gauge     | `position.observed`, one per field                                |
+| `quoter_bot.bootstrap.credit_assets` / `.credit_target_assets`         | gauge     | `bootstrap.progress`                                              |
+| `quoter_bot.book.*` (`rungs`, `total_assets`, `quoting`, `*_rate_bps`) | gauge     | `book.observed`                                                   |
+
+Every exported span and metric carries resource identity `service.name: quoter-bot`
+(`OTEL_SERVICE_NAME` overrides), `service.version`, and `chainId`. Metrics export every 60 s
+(`OTEL_METRIC_EXPORT_INTERVAL` overrides, in milliseconds); spans batch-export continuously; on
+shutdown both flush with a 10-second bound. Lifecycle is visible as `otel.started`,
+`otel.start-failed`, and `otel.shutdown-failed` records, and SDK-internal export errors surface as
+a rate-limited `otel.diagnostic` record carrying a classification token only — endpoint URLs and
+headers may embed credentials and are never logged.
+
+For a local stack, `docker compose --profile otel up` starts a bundled
+collector/Tempo/Prometheus/Loki/Grafana ([`grafana/otel-lgtm`](https://github.com/grafana/docker-otel-lgtm));
+point the bot at `http://otel-lgtm:4318` (from inside compose) or `http://127.0.0.1:4318` (from a
+local `start`) and open Grafana on `http://localhost:3000`. As with Better Stack, this repository
+does not provision or claim a deployed collector or dashboard.
 
 ### YAML schema
 

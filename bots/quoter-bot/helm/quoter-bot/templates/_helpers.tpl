@@ -17,6 +17,30 @@
 {{- end }}
 {{- end }}
 
+{{/*
+Stable EVM chain identity for this release. An explicit value is required when the configuration
+comes from an external Secret; chart-managed configuration can supply config.chain.id directly.
+*/}}
+{{- define "quoter-bot.chainId" -}}
+{{- $explicit := .Values.instance.chainId | default "" | toString -}}
+{{- $configured := dig "chain" "id" "" (.Values.config | default dict) | toString -}}
+{{- if and $explicit $configured (ne $explicit $configured) -}}
+{{- fail (printf "quoter-bot: instance.chainId %q does not match config.chain.id %q" $explicit $configured) -}}
+{{- end -}}
+{{- $chainId := default $configured $explicit -}}
+{{- if and $chainId (not (regexMatch "^[1-9][0-9]*$" $chainId)) -}}
+{{- fail (printf "quoter-bot: chain ID %q must be a positive base-10 integer" $chainId) -}}
+{{- end -}}
+{{- $chainId -}}
+{{- end }}
+
+{{/* Chain label kept out of selectors so upgrading an existing StatefulSet remains legal. */}}
+{{- define "quoter-bot.chainLabel" -}}
+{{- with (include "quoter-bot.chainId" .) }}
+quoter-bot.morpho.org/chain-id: {{ . | quote }}
+{{- end }}
+{{- end }}
+
 {{/* Chart-and-version label value. */}}
 {{- define "quoter-bot.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
@@ -30,6 +54,7 @@ helm.sh/chart: {{ include "quoter-bot.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{ include "quoter-bot.chainLabel" . }}
 {{- end }}
 
 {{/*
@@ -77,9 +102,9 @@ truncating, so distinct releases sharing a truncated prefix never collide on the
 {{- end }}
 
 {{/*
-Name of the release-name-keyed ConfigMap pinning the installed fullname. Bounded to the
-63-character DNS label limit, with an 8-character hash of the complete release name keeping the
-pin unique even when long release names share their truncated prefix.
+Name of the release-name-keyed ConfigMap pinning the installed fullname and chain identity.
+Bounded to the 63-character DNS label limit, with an 8-character hash of the complete release name
+keeping the pin unique even when long release names share their truncated prefix.
 */}}
 {{- define "quoter-bot.releaseFullnameConfigMapName" -}}
 {{- printf "%s-%s-quoter-bot-fullname" (.Release.Name | trunc 34 | trimSuffix "-") (sha256sum .Release.Name | trunc 8) }}

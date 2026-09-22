@@ -31,6 +31,32 @@ describe('createDeploylessClient', () => {
   })
 })
 
+describe('MAX_DEPLOYLESS_BATCH_SIZE', () => {
+  const build = (value: string) =>
+    createDeploylessClient({
+      chain: base,
+      rpcUrl: RPC,
+      rpcUrlFallback: undefined,
+      env: { MAX_DEPLOYLESS_BATCH_SIZE: value }
+    })
+
+  it.each(['100kb', '1e6', '-1', '0', '12.5', 'all'])(
+    'rejects %s rather than chunking to a number it half-read',
+    value => {
+      // `parseInt` takes '100kb' as 100, which would silently chunk every lens read to 100 bytes.
+      expect(() => build(value)).toThrow(/MAX_DEPLOYLESS_BATCH_SIZE/)
+    }
+  )
+
+  it('rejects a value past 2^53, where Number would lose precision', () => {
+    expect(() => build('9007199254740993')).toThrow(/safe integer/)
+  })
+
+  it('accepts a plain positive integer', () => {
+    expect(() => build('2000000')).not.toThrow()
+  })
+})
+
 describe('assertContractDeployed', () => {
   it('throws when the address holds no code', async () => {
     await expect(

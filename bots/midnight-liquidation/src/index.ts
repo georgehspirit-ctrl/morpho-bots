@@ -3,6 +3,7 @@ import type { Address, Hex } from 'viem'
 
 import {
   assertContractDeployed,
+  withLogging,
   createBalanceMonitor,
   createBackoff,
   createCooldownStore,
@@ -357,7 +358,13 @@ async function main() {
       seizeCapMarginBps: config.quoting.seizeCapMarginBps,
       minSurplusBps: config.quoting.minSurplusBps,
       headroomFloorBps: config.quoting.headroomFloorBps,
-      readLens: pairs => readMidnightLiquidationLens(client, config.midnight, pairs),
+      // Scoped to the lens read: viem-dlc emits per outermost request inside the scope, so a
+      // wider scope would ship every per-block receipt and nonce read too.
+      readLens: pairs =>
+        withLogging(() => readMidnightLiquidationLens(client, config.midnight, pairs), {
+          logger: logger.layer,
+          lens: 'midnight-liquidation'
+        }),
       quoteFor,
       simulate: ({ market, borrower, plan, swapPlan }) =>
         simulateLiquidationExec(client, {

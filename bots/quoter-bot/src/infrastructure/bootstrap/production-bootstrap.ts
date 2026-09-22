@@ -19,6 +19,7 @@ import type {
   BootstrapPositionService,
   BootstrapReferenceRateService
 } from '../../application/bootstrap/position-bootstrap.service'
+import type { OperatorAdapterOperation } from '../../application/operator-error-name.utils'
 import type { ConfigService } from '../../config/config.service'
 import type { BootstrapOffer } from '../../domain/bootstrap/position-bootstrap'
 import type { HistoricalBlockReader } from '../reference/blue-reference-reader.utils'
@@ -453,7 +454,8 @@ export const createProductionBootstrapAdapters = (
   const blueRates = new BlueBootstrapReferenceRateService(
     createBlueReferenceReader(
       config.setup.referenceMarketId ?? config.setup.marketIds[0]!,
-      referenceClient as HistoricalBlockReader
+      referenceClient as HistoricalBlockReader,
+      config.chainId
     ),
     config.referenceLookbackSeconds
   )
@@ -668,7 +670,7 @@ export const createProductionBootstrapAdapters = (
     policy: Parameters<typeof assertBootstrapTransaction>[1],
     operation: 'cancel' | 'ratify' | 'publish',
     onTransactionSubmitted?: BootstrapTransactionSubmittedObserver,
-    revertOperation = 'transaction-reverted'
+    revertOperation: OperatorAdapterOperation = 'transaction-reverted'
   ) => {
     await assertBootstrapTransaction(transaction, policy)
     try {
@@ -681,7 +683,7 @@ export const createProductionBootstrapAdapters = (
     } catch (error) {
       if (
         error instanceof QuoterTransactionError &&
-        ['transaction-pending', 'transaction-dropped'].includes(error.operation)
+        (error.operation === 'transaction-pending' || error.operation === 'transaction-dropped')
       ) {
         throw new BootstrapAdapterError(error.operation)
       }

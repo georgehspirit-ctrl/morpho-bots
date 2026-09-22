@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@internationalized/date": "catalog:",
+    "@morpho-org/blue-sdk": "catalog:",
     "@morpho-org/morpho-ts": "catalog:",
     "@morpho-org/viem-dlc": "catalog:",
     "date-fns": "catalog:",

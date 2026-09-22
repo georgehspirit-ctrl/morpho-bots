@@ -168,3 +168,53 @@ describe('guardrail.book-crossed', () => {
     })
   })
 })
+
+describe('guardrail.halted', () => {
+  test('ships the allowlisted adapter operation beside the collapsed error name', () => {
+    const events = ladderMonitoringEvents([
+      {
+        marketId,
+        status: 'halted',
+        stage: 'reference-read',
+        strategyInvalidated: true,
+        errorName: 'ReferenceAdapterError',
+        adapterOperation: 'reference-history'
+      }
+    ])
+
+    expect(events).toEqual([
+      {
+        event: 'cycle.completed',
+        workflow: 'ladder',
+        marketId,
+        status: 'halted',
+        stage: 'reference-read',
+        errorName: 'ReferenceAdapterError',
+        adapterOperation: 'reference-history'
+      },
+      {
+        event: 'guardrail.halted',
+        workflow: 'ladder',
+        marketId,
+        stage: 'reference-read',
+        reason: 'ReferenceAdapterError',
+        strategyInvalidated: true,
+        adapterOperation: 'reference-history'
+      }
+    ])
+  })
+
+  test('omits the field when the failure carried no allowlisted operation', () => {
+    const events = ladderMonitoringEvents([
+      {
+        marketId,
+        status: 'halted',
+        stage: 'reference-read',
+        strategyInvalidated: false,
+        errorName: 'HttpRequestError'
+      }
+    ])
+
+    expect(events.every(event => !('adapterOperation' in event))).toBe(true)
+  })
+})

@@ -2,6 +2,7 @@ import type { MonitorOperationQueue } from '@repo/monitoring'
 import type { Hex } from 'viem'
 
 import { cycleHasFailure, cycleRequiresHalt, waitForMonitorInterval } from '@repo/monitoring'
+import { withActiveSpan } from '@repo/telemetry'
 
 import type {
   LadderConfig,
@@ -9,6 +10,7 @@ import type {
   LadderMarketState,
   LadderQuoteSet
 } from '../../domain/ladder/ladder'
+import type { OperatorAdapterOperation } from '../operator-error-name.utils'
 import type {
   LadderBookReconciliation,
   LadderBookSideCrossingReport,
@@ -34,7 +36,7 @@ import {
   createMarketFailureBudget
 } from '../market-failure-budget.utils'
 import { marketObservationMatured } from '../market-maturity.utils'
-import { operatorErrorName } from '../operator-error-name.utils'
+import { adapterOperationField, operatorErrorName } from '../operator-error-name.utils'
 import { LadderOwnershipCleanupError } from './ladder-ownership-cleanup.error'
 import { sameLadderQuoteSet } from './ladder-quoter.utils'
 
@@ -189,6 +191,7 @@ type LadderRunOutcome =
       strategyInvalidated: boolean
       strategyInvalidationLogged?: boolean
       errorName: string
+      adapterOperation?: OperatorAdapterOperation
       marketInvalidationErrorName?: string
       invalidationErrorName?: string
     }
@@ -305,9 +308,16 @@ export class LadderQuoterService {
           await parameters.onCycle?.(results)
           return results
         }
-        const results = parameters.runOperation
-          ? await parameters.runOperation(runCycle)
-          : await runCycle()
+        // The span wraps the enqueue, so wait behind the shared mutation queue is traced.
+        const results = await withActiveSpan(
+          {
+            name: 'quoter-bot.cycle',
+            attributes: { workflow: 'ladder' },
+            errorName: operatorErrorName,
+            failed: cycle => cycle !== undefined && cycleHasFailure(cycle)
+          },
+          () => (parameters.runOperation ? parameters.runOperation(runCycle) : runCycle())
+        )
         if (results === undefined) break
         cycles += 1
 
@@ -997,6 +1007,7 @@ export class LadderQuoterService {
           strategyInvalidated: invalidation !== 'logged',
           ...(invalidation === 'logged' ? { strategyInvalidationLogged: true } : {}),
           errorName: operatorErrorName(error),
+          ...adapterOperationField(error),
           ...marketInvalidationFailure
         },
         makeResult: invalidation
@@ -1009,6 +1020,7 @@ export class LadderQuoterService {
           stage,
           strategyInvalidated: false,
           errorName: operatorErrorName(error),
+          ...adapterOperationField(error),
           ...marketInvalidationFailure,
           invalidationErrorName: operatorErrorName(invalidationError)
         }

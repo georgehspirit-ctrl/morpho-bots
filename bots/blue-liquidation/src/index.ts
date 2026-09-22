@@ -3,6 +3,7 @@ import type { Address, Hex } from 'viem'
 
 import {
   assertContractDeployed,
+  withLogging,
   createBalanceMonitor,
   createBackoff,
   createCooldownStore,
@@ -268,7 +269,13 @@ async function main() {
     runTick({
       discover,
       chainHead,
-      readLens: pairs => readBlueLiquidationLens(client, config.morpho, pairs),
+      // Scoped to the lens read: viem-dlc emits per outermost request inside the scope, so a
+      // wider scope would ship every per-block receipt and nonce read too.
+      readLens: pairs =>
+        withLogging(() => readBlueLiquidationLens(client, config.morpho, pairs), {
+          logger: logger.layer,
+          lens: 'blue-liquidation'
+        }),
       quoteFor,
       simulate: ({ market, borrower, plan, swapPlan }) =>
         simulateLiquidationExec(client, {

@@ -1,6 +1,7 @@
 import type { Address, Hex } from 'viem'
 
 import { waitForMonitorInterval } from '@repo/monitoring'
+import { withActiveSpan } from '@repo/telemetry'
 import { maxUint256 } from 'viem'
 
 import type { SupportedChainId } from '../../config/supported-chains.utils'
@@ -301,7 +302,15 @@ export class SetupCheckService {
 
     while (!parameters.signal.aborted) {
       try {
-        const report = await this.checkWithTransientRetries(parameters.signal, false)
+        const report = await withActiveSpan(
+          {
+            name: 'quoter-bot.cycle',
+            attributes: { workflow: 'setup-check' },
+            errorName: operatorErrorName,
+            failed: checked => !checked.ready
+          },
+          () => this.checkWithTransientRetries(parameters.signal, false)
+        )
         if (parameters.signal.aborted) break
 
         const transientOnly = hasOnlyTransientProviderFailures(report)

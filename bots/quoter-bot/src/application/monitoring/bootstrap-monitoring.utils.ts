@@ -1,6 +1,8 @@
 import type { BootstrapRunResult } from '../bootstrap/position-bootstrap.service'
 import type { MonitoringEvent } from './monitoring-event'
 
+import { adapterOperationOf } from './monitoring-event'
+
 const cycleCompleted = (result: BootstrapRunResult): MonitoringEvent => ({
   event: 'cycle.completed',
   workflow: 'bootstrap',
@@ -10,6 +12,7 @@ const cycleCompleted = (result: BootstrapRunResult): MonitoringEvent => ({
   ...('action' in result ? { action: result.action } : {}),
   ...('reason' in result ? { reason: result.reason } : {}),
   ...('errorName' in result ? { errorName: result.errorName } : {}),
+  ...adapterOperationOf(result),
   ...(result.verbose?.durationMs === undefined ? {} : { durationMs: result.verbose.durationMs })
 })
 
@@ -107,7 +110,8 @@ export const bootstrapMonitoringEvents = (
             marketId: result.marketId,
             stage: result.stage,
             reason: haltReason(result),
-            strategyInvalidated: result.strategyInvalidated
+            strategyInvalidated: result.strategyInvalidated,
+            ...adapterOperationOf(result)
           }
         ] as const)
       : []),

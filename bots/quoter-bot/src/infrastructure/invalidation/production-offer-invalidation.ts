@@ -3,6 +3,7 @@ import { morphoViemExtension } from '@morpho-org/morpho-sdk'
 import { createPublicClient, http, isAddressEqual } from 'viem'
 
 import type { OfferInvalidationPort } from '../../application/invalidation/offer-invalidation.service'
+import type { OperatorAdapterOperation } from '../../application/operator-error-name.utils'
 import type { ConfigService } from '../../config/config.service'
 
 import { supportedChain } from '../../config/supported-chains.utils'
@@ -20,7 +21,7 @@ import { offerInvalidationGroupIds } from './offer-invalidation-group.utils'
 import { assertOfferInvalidationTransaction } from './offer-invalidation-transaction.utils'
 
 const providerOperation = async <Result>(
-  operation: string,
+  operation: OperatorAdapterOperation,
   execute: () => Promise<Result>
 ): Promise<Result> => {
   try {

@@ -13,6 +13,11 @@ real install/upgrade.
 {{- if ne $installedFullname $fullname }}
 {{- fail (printf "quoter-bot: this release was installed as StatefulSet %q; renaming it to %q via nameOverride/fullnameOverride would start a second writer. To rename: run `helm uninstall --wait` with a timeout beyond terminationGracePeriodSeconds, confirm the old pod is fully deleted, then reinstall — keeping your persistence.existingClaim unchanged if you configured one, or setting it to the kept chart-created state claim (its name ends in -state; kubectl get pvc), so durable offer-group ownership is preserved." $installedFullname $fullname) }}
 {{- end }}
+{{- $chainId := include "quoter-bot.chainId" . }}
+{{- $installedChainId := dig "chain-id" $chainId (($identity | default dict).data | default dict) }}
+{{- if and $chainId (ne $installedChainId $chainId) }}
+{{- fail (printf "quoter-bot: this release owns chain %q and cannot be changed to chain %q. Install a separate Helm release so each chain keeps an isolated writer and state claim." $installedChainId $chainId) }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -22,8 +27,9 @@ metadata:
     {{- include "quoter-bot.labels" . | nindent 4 }}
 spec:
   # The bot is a singleton writer: its nonce cursor, serialized mutation queue, and durable
-  # offer-group ownership state are per-instance, so two replicas against one maker would race
-  # nonces and fight over the offer book. A StatefulSet enforces at-most-one across rollouts,
+  # offer-group ownership state are per-instance, so two replicas against one maker on the same
+  # chain would race nonces and fight over the offer book. A StatefulSet enforces at-most-one
+  # across rollouts,
   # graceful pod deletion, and eviction, because it never creates the replacement pod until the
   # old one is confirmed fully terminated — which matters during the deliberately long SIGTERM
   # offer-cleanup drain. A Deployment (even with Recreate) only guarantees that for rollouts.
@@ -65,6 +71,7 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- include "quoter-bot.chainLabel" . | nindent 8 }}
         {{- include "quoter-bot.selectorLabels" . | nindent 8 }}
     spec:
       # The bot never talks to the Kubernetes API; cloud workload-identity webhooks (IRSA, EKS

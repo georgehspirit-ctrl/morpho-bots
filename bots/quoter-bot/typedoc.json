@@ -59,6 +59,7 @@
     "src/infrastructure/cli/cli.ts",
     "src/infrastructure/cli/quoter-bot-entrypoint.ts",
     "src/infrastructure/cli/offer-invalidation-argument.utils.ts",
+    "src/infrastructure/historical-block.utils.ts",
     "src/infrastructure/invalidation/offer-invalidation-adapter.error.ts",
     "src/infrastructure/invalidation/offer-invalidation-group.utils.ts",
     "src/infrastructure/invalidation/offer-invalidation-transaction.utils.ts",

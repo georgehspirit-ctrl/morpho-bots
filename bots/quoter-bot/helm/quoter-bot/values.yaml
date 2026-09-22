@@ -22,6 +22,13 @@ imagePullSecrets: []
 nameOverride: ''
 fullnameOverride: ''
 
+# Stable chain identity for this release. Set this whenever configuration comes from
+# existingConfigSecret, because Helm cannot inspect that Secret's contents. For chart-managed
+# config the value is inferred from config.chain.id; setting both is allowed only when they match.
+# Once installed, changing the chain ID is rejected: each chain needs its own release and state PVC.
+instance:
+  chainId: ''
+
 # Kubernetes only re-pulls the image when a pod is created, so with an unchanged pod template a
 # moved mutable tag (like the default `latest`) is never picked up by `helm upgrade` alone. Set
 # to true to stamp an upgrade-time annotation that rolls the pod on every `helm upgrade`;
@@ -134,7 +141,8 @@ existingConfigSecret: ''
 # Extra environment variables (list of EnvVar objects). Environment values override their YAML
 # counterparts, so this is the place for the signer secret and for the environment-only Better
 # Stack settings (BETTERSTACK_SOURCE_TOKEN, BETTERSTACK_INGESTING_HOST,
-# BETTERSTACK_HEARTBEAT_URL). XDG_STATE_HOME is chart-managed and reserved: entries with that
+# BETTERSTACK_HEARTBEAT_URL) and OpenTelemetry export settings (OTEL_EXPORTER_OTLP_ENDPOINT,
+# OTEL_EXPORTER_OTLP_HEADERS). XDG_STATE_HOME is chart-managed and reserved: entries with that
 # name are ignored so durable ownership state cannot be detached from the retained PVC.
 # Rotating a referenced Secret in place does not reach the running process — environment
 # variables are captured at container start — so follow a signer rotation with

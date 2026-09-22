@@ -134,6 +134,28 @@ describe('quoter-bot Helm chart', () => {
     expect(releaseFullname).toContain('fullname: {{ include "quoter-bot.fullname" . | quote }}')
   })
 
+  it('pins one chain identity per release without changing immutable selectors', async () => {
+    const [helpers, identity, statefulSet, values] = await Promise.all([
+      readChartFile('templates/_helpers.tpl'),
+      readChartFile('templates/release-fullname.yaml'),
+      readChartFile('templates/statefulset.yaml'),
+      readChartFile('values.yaml')
+    ])
+
+    expect(values).toContain("instance:\n  chainId: ''")
+    expect(helpers).toContain('instance.chainId %q does not match config.chain.id %q')
+    expect(helpers).toContain('quoter-bot.morpho.org/chain-id: {{ . | quote }}')
+    expect(identity).toContain('chain-id: {{ . | quote }}')
+    expect(statefulSet).toContain('dig "chain-id" $chainId')
+    expect(statefulSet).toContain('Install a separate Helm release')
+
+    const selectorBlock = helpers.slice(
+      helpers.indexOf('define "quoter-bot.selectorLabels"'),
+      helpers.indexOf('define "quoter-bot.serviceAccountName"')
+    )
+    expect(selectorBlock).not.toContain('chain-id')
+  })
+
   it('reserves the PVC retention annotation while retain is enabled', async () => {
     const pvc = await readChartFile('templates/pvc.yaml')
     const filtered = pvc.indexOf('omit $pvcAnnotations "helm.sh/resource-policy"')
@@ -273,6 +295,7 @@ describe('quoter-bot Helm chart', () => {
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- include "quoter-bot.chainLabel" . | nindent 8 }}
         {{- include "quoter-bot.selectorLabels" . | nindent 8 }}`)
   })
 })

@@ -70,29 +70,6 @@ export const isSupportedChainId = (value: number): value is SupportedChainId =>
 export const supportedChain = (chainId: SupportedChainId) => SUPPORTED_CHAINS[chainId]
 
 /**
- * Estimates how many blocks span a reference-rate lookback window on one chain.
- * @param chainId - Supported EVM chain identifier.
- * @param lookbackSeconds - Configured averaging window, in seconds.
- * @returns The block count covering that window at the chain's cadence, rounded up.
- * @remarks A fixed block count is chain-specific: 10,800 blocks is six hours on Base's two-second
- * cadence but about 36 hours on Ethereum's twelve-second cadence, which would make setup inspect
- * far older state than the rate reader needs and fail readiness for a recently initialized or
- * recently funded reference market. Derived from viem's `blockTime` instead.
- *
- * Rounding up is load-bearing, not cosmetic: readiness only proves the archive can serve what the
- * reader will ask for while the probe reaches at least as deep, and the reader selects by timestamp
- * rather than block count. Rounding down would let a window that is not a whole number of blocks
- * pass readiness and then fail at runtime. That inequality also assumes actual block spacing never
- * undershoots `blockTime`, which holds for Base's two-second floor and Ethereum's twelve-second
- * slots. Dividing in milliseconds keeps the conversion exact for a sub-second or fractional-second
- * cadence, where truncating to whole seconds would over-probe or divide by zero.
- */
-export const referenceLookbackBlocks = (chainId: SupportedChainId, lookbackSeconds: bigint) => {
-  const blockTimeMs = BigInt(SUPPORTED_CHAINS[chainId].blockTime)
-  return (lookbackSeconds * 1000n + blockTimeMs - 1n) / blockTimeMs
-}
-
-/**
  * Resolves the chain ID used to label observability before configuration is validated.
  * @param environment - Process environment read for `CHAIN_ID`.
  * @returns The configured chain when it names a supported chain, otherwise {@link BASE_CHAIN_ID}.

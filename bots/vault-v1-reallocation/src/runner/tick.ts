@@ -12,7 +12,11 @@ export type TickDeps = {
   chainHead: bigint
   /** The reallocator EOA, compared against each fetched vault's owner and curator. */
   eoa: Address
-  fetchVault: (vault: Address, blockNumber: bigint) => Promise<VaultData>
+  /**
+   * One deployless read covering every eligible vault. Returns a map keyed by lower-cased vault
+   * address; a vault the lens could not serve is simply absent.
+   */
+  fetchVaults: (vaults: readonly Address[], blockNumber: bigint) => Promise<Map<string, VaultData>>
   strategy: Strategy
   encodeReallocate: (allocations: MarketAllocation[]) => Hex
   simulate: (vault: Address, data: Hex) => Promise<SimulateResult>
@@ -50,9 +54,11 @@ const noCounts = (): VaultCounters => ({
 
 const COUNTER_KEYS = Object.keys(noCounts()) as (keyof VaultCounters)[]
 
-const processVault = async (deps: TickDeps, vault: Address): Promise<VaultCounters> => {
-  const vaultData = await deps.fetchVault(vault, deps.chainHead)
-
+const processVault = async (
+  deps: TickDeps,
+  vault: Address,
+  vaultData: VaultData
+): Promise<VaultCounters> => {
   // The whole of MetaMorpho's `onlyAllocatorRole`, all three parts read in the snapshot's single call.
   const hasRole =
     vaultData.isAllocator ||
@@ -103,24 +109,60 @@ const processVault = async (deps: TickDeps, vault: Address): Promise<VaultCounte
 }
 
 /**
- * One reallocation pass: every whitelisted vault is processed concurrently — skip if a tx is in
- * flight, fetch a block-pinned snapshot (one deployless `eth_call`, roles included), skip (loudly) if
- * the EOA holds no allocator role, run the strategy, simulate the exact broadcast bytes, and submit (or
- * dry-run-log) on sim-ok. A failure in one vault logs `vault.error` and never blocks the others;
- * counters are folded after every vault settles and closed by one wide `tick.end` line.
+ * One reallocation pass: in-flight vaults are dropped, the rest are read in ONE block-pinned
+ * deployless call (roles included), then processed concurrently — skip (loudly) if the EOA holds no
+ * allocator role, run the strategy, simulate the exact broadcast bytes, and submit (or dry-run-log)
+ * on sim-ok. A failure in one vault logs `vault.error` and never blocks the others; counters are
+ * folded after every vault settles and closed by one wide `tick.end` line.
+ *
+ * The read is batched, so unlike the per-vault work it is a single point of failure: a rejected
+ * request costs every vault this pass rather than one, and the interval gate means the retry is the
+ * next reallocation interval rather than the next block. That is the trade for N-1 fewer round trips
+ * and N-1 fewer deployless deploys; the failure is fanned out below so the counters and `vault.error`
+ * lines still read per vault.
  */
 export const runTick = async (deps: TickDeps): Promise<void> => {
   const started = Date.now()
   const inflight = deps.inflightLabels()
 
+  // Filtered BEFORE the read, not per vault after it: an in-flight vault should not be paid for.
+  const eligible = deps.vaults.filter(vault => {
+    if (!inflight.has(vault)) return true
+    deps.logger.debug('vault.inflight', { vault })
+    return false
+  })
+  const skippedInflight = deps.vaults.length - eligible.length
+
+  const snapshot = await tryCatch(
+    eligible.length === 0
+      ? Promise.resolve(new Map<string, VaultData>())
+      : deps.fetchVaults(eligible, deps.chainHead)
+  )
+  if (snapshot.error) {
+    // One rejection yields no rows at all, so the per-vault lines have to be emitted explicitly or
+    // the tick would close having silently done nothing for the whole whitelist.
+    const reason = deps.revertReason(snapshot.error)
+    for (const vault of eligible) deps.logger.error('vault.error', { vault, reason })
+    deps.logger.info('tick.end', {
+      blockNumber: deps.chainHead,
+      ...noCounts(),
+      skipped_inflight: skippedInflight,
+      errors: eligible.length,
+      vaults: deps.vaults.length,
+      duration_ms: Date.now() - started
+    })
+    return
+  }
+
   // Never rejects: every mapped element folds its own failure into a counter via `tryCatch`.
   const perVault = await Promise.all(
-    deps.vaults.map(async (vault): Promise<VaultCounters> => {
-      if (inflight.has(vault)) {
-        deps.logger.debug('vault.inflight', { vault })
-        return { ...noCounts(), skipped_inflight: 1 }
+    eligible.map(async (vault): Promise<VaultCounters> => {
+      const vaultData = snapshot.data.get(vault.toLowerCase())
+      if (!vaultData) {
+        deps.logger.error('vault.error', { vault, reason: 'lens returned no row for this vault' })
+        return { ...noCounts(), errors: 1 }
       }
-      const { data, error } = await tryCatch(processVault(deps, vault))
+      const { data, error } = await tryCatch(processVault(deps, vault, vaultData))
       if (error) {
         deps.logger.error('vault.error', { vault, reason: deps.revertReason(error) })
         return { ...noCounts(), errors: 1 }
@@ -133,6 +175,7 @@ export const runTick = async (deps: TickDeps): Promise<void> => {
     for (const key of COUNTER_KEYS) acc[key] += result[key]
     return acc
   }, noCounts())
+  counters.skipped_inflight += skippedInflight
 
   deps.logger.info('tick.end', {
     blockNumber: deps.chainHead,

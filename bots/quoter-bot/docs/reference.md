@@ -410,11 +410,12 @@ than onto each record, so every line carries it at zero per-event cost and a con
 contract. It is bumped only on a breaking field rename or removal; adding an optional field is not
 breaking.
 
-`adapterOperation` is not a shipped field. Bootstrap failure and halt results carry it internally:
-an allowlisted reason such as `negative-spread` or `transaction-policy`, withheld when
-unrecognized. The projection reads it solely to decide whether to emit
-`guardrail.spread-rejected`, which the collapsed `errorName` classification could not distinguish.
-It appears on no `MonitoringEvent` variant, so it is not a grouping dimension in the log source.
+`adapterOperation` is the one field finer than `errorName`. Failure and halt results carry the
+adapter's allowlisted reason — `negative-spread`, `reference-stale`, `reference-history` — withheld
+when unrecognized, so it can never carry provider text. `cycle.completed` and `guardrail.halted`
+ship it as an optional field: a reference-read halt otherwise collapses to one adapter class
+(`BootstrapAdapterError` for a stale archive head or a zero-rate window, `ReferenceAdapterError` for
+a window older than the market), and only the operation names the check that failed. The bootstrap projection also keys `guardrail.spread-rejected` on it.
 
 Records are projected from cycle results that are already sanitized — the projections read nothing
 and never re-classify an error. Only allowlisted `errorName` classifications ship; raw error text,
@@ -439,13 +440,13 @@ human-scaled: a consumer resolves decimals from the `loanAsset` address shipped 
 | `bot.configured`               | Once per process start, from the validated configuration                                                                      | `bootstrapIntervalSeconds`, `loanAsset`, `referenceMode` (`static` \| `variable` \| `mixed`), `readOnly`                                                                                                                                                               |
 | `market.configured`            | Once per configured market, immediately after `bot.configured`                                                                | `marketId`, `ladder`, `bootstrap` (which workflows the market is configured for), `ladderIntervalSeconds?` (that market's own `loopIntervalSeconds`; absent for a bootstrap-only market, whose cadence is `bootstrapIntervalSeconds`)                                  |
 | `bot.failed`                   | A terminal failure stops the process; one per process, plus one per failed workflow                                           | `workflow?` (`setup-check` \| `bootstrap` \| `ladder`; absent on the process-level record), `reason`, `errorName?`                                                                                                                                                     |
-| `cycle.completed`              | Once per market per bootstrap/ladder cycle, and once per setup check                                                          | `workflow` (`setup-check` \| `bootstrap` \| `ladder`), `marketId?` (absent for `setup-check`), `status` (`ready` \| `failed` for `setup-check`), `stage?`, `action?`, `reason?`, `durationMs?`, `errorName?`                                                           |
+| `cycle.completed`              | Once per market per bootstrap/ladder cycle, and once per setup check                                                          | `workflow` (`setup-check` \| `bootstrap` \| `ladder`), `marketId?` (absent for `setup-check`), `status` (`ready` \| `failed` for `setup-check`), `stage?`, `action?`, `reason?`, `durationMs?`, `errorName?`, `adapterOperation?`                                      |
 | `guardrail.rate-clamped`       | A cycle clamped a rate to its bound; ladder aggregates per side, bootstrap reports one rung                                   | `workflow`, `marketId`, `side?` (absent for `bootstrap`), `clampedRungs`, `bound` (`minimum` \| `maximum`), `minimumRateBps`, `maximumRateBps`                                                                                                                         |
 | `guardrail.cross-book-cleared` | Cross-book clearance repriced at least one rung on a side                                                                     | `workflow`, `marketId`, `side`, `clearedRungs`                                                                                                                                                                                                                         |
 | `guardrail.exposure-capped`    | A bootstrap offer was sized below its request by an inventory limit                                                           | `workflow`, `marketId`, `requestedAssets`, `cappedAssets`, `cap` (`offer-size` \| `credit-target` \| `cash-balance` \| `market-exposure` \| `total-exposure`)                                                                                                          |
 | `guardrail.rungs-truncated`    | A side funded fewer rungs than configured                                                                                     | `marketId`, `side`, `configuredRungs`, `fundedRungs`                                                                                                                                                                                                                   |
 | `guardrail.spread-rejected`    | A bootstrap result carries `adapterOperation: "negative-spread"`                                                              | `marketId`                                                                                                                                                                                                                                                             |
-| `guardrail.halted`             | A bootstrap or ladder cycle halted, pulling offers                                                                            | `workflow`, `marketId?`, `stage`, `reason`, `strategyInvalidated`                                                                                                                                                                                                      |
+| `guardrail.halted`             | A bootstrap or ladder cycle halted, pulling offers                                                                            | `workflow`, `marketId?`, `stage`, `reason`, `strategyInvalidated`, `adapterOperation?`                                                                                                                                                                                 |
 | `reference.observed`           | A verbose bootstrap or ladder cycle read a reference rate; event time is the staleness anchor                                 | `workflow`, `marketId`, `referenceRateBps`, `targetRateBps?`                                                                                                                                                                                                           |
 | `position.observed`            | A verbose ladder cycle observed post-check market state                                                                       | `marketId`, `cashBalanceAssets?`, `creditAssets?`, `otherMarketCreditAssets?`, `reservedAssets?`, `marketReservedAssets?`, `maturityTimestamp?`, `lowerRateCapacityAssets?`, `higherRateCapacityAssets?`, `targetMarketCapacityAssets?`, `maximumTotalCapacityAssets?` |
 | `bootstrap.progress`           | A verbose bootstrap cycle observed position state                                                                             | `marketId`, `creditAssets`, `creditTargetAssets`                                                                                                                                                                                                                       |
@@ -471,7 +472,8 @@ because a settled transaction is confirmed by definition.
 #### Cardinality
 
 Safe grouping dimensions are `workflow`, `marketId`, `side`, `status`, `stage`, `action`, `reason`,
-`check`, `bound`, `cap`, `operation`, `state`, and `referenceMode`. `marketId` is safe only
+`check`, `bound`, `cap`, `operation`, `state`, `referenceMode`, and `adapterOperation`. `marketId`
+is safe only
 because it is bounded by the configured allowlist.
 
 `txHash` and `groupId` are unbounded trace-only correlation fields. Use them to join records within

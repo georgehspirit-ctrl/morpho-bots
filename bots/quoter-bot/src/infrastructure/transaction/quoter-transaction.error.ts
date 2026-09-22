@@ -1,3 +1,5 @@
+import type { OperatorAdapterOperation } from '../../application/operator-error-name.utils'
+
 /** Sanitized failure from the guarded quoter transaction lifecycle. */
 export class QuoterTransactionError extends Error {
   readonly name = 'QuoterTransactionError'
@@ -7,7 +9,8 @@ export class QuoterTransactionError extends Error {
    * @param operation - Sanitized lifecycle stage that failed.
    */
   constructor(
-    readonly operation:
+    readonly operation: Extract<
+      OperatorAdapterOperation,
       | 'configuration'
       | 'simulation-reverted'
       | 'submission-refused'
@@ -16,6 +19,7 @@ export class QuoterTransactionError extends Error {
       | 'transaction-pending'
       | 'reconciliation-required'
       | 'unknown-pending-nonce'
+    >
   ) {
     super(`Quoter transaction ${operation}`)
   }

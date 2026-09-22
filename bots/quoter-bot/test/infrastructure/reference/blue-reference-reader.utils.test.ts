@@ -1,6 +1,7 @@
 import { Market, MarketParams } from '@morpho-org/morpho-sdk/entities'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { BASE_CHAIN_ID } from '../../../src/config/supported-chains.utils'
 import { createBlueReferenceReader } from '../../../src/infrastructure/reference/blue-reference-reader.utils'
 import { ReferenceAdapterError } from '../../../src/infrastructure/reference/reference-adapter.error'
 
@@ -63,7 +64,11 @@ describe('createBlueReferenceReader', () => {
 
   test('rejects a historical checkpoint whose block predates the reference market', async () => {
     fetchMarket.mockResolvedValue(market())
-    const reader = createBlueReferenceReader(marketId, client(1_000n, block => block) as never)
+    const reader = createBlueReferenceReader(
+      marketId,
+      client(1_000n, block => block) as never,
+      BASE_CHAIN_ID
+    )
 
     const error: unknown = await reader.readAtOrBefore(500n).catch(value => value)
 
@@ -73,7 +78,11 @@ describe('createBlueReferenceReader', () => {
 
   test('rejects a market that exists but holds no supply shares', async () => {
     fetchMarket.mockResolvedValue(market({ lastUpdate: LAST_UPDATE }))
-    const reader = createBlueReferenceReader(marketId, client(1_000n, block => block) as never)
+    const reader = createBlueReferenceReader(
+      marketId,
+      client(1_000n, block => block) as never,
+      BASE_CHAIN_ID
+    )
 
     await expect(reader.readLatest()).rejects.toMatchObject({
       operation: 'reference-uninitialized'
@@ -86,7 +95,8 @@ describe('createBlueReferenceReader', () => {
     fetchMarket.mockResolvedValue(accruing)
     const reader = createBlueReferenceReader(
       marketId,
-      client(1_000n, block => LAST_UPDATE + block * 2n) as never
+      client(1_000n, block => LAST_UPDATE + block * 2n) as never,
+      BASE_CHAIN_ID
     )
 
     expect(await reader.readLatest()).toMatchObject({
@@ -101,22 +111,43 @@ describe('createBlueReferenceReader', () => {
     })
   })
 
-  test('binary-searches to the block at or before the requested timestamp', async () => {
+  test('locates the block at or before the requested timestamp', async () => {
     fetchMarket.mockResolvedValue(funded(1_000_000_000n))
     const reader = createBlueReferenceReader(
       marketId,
-      client(1_000n, block => LAST_UPDATE + block * 2n) as never
+      client(1_000n, block => LAST_UPDATE + block * 2n) as never,
+      BASE_CHAIN_ID
     )
 
     // Blocks are two seconds apart, so a target one second past block 500 resolves back to it.
     expect(await reader.readAtOrBefore(LAST_UPDATE + 1_001n)).toMatchObject({ blockNumber: 500n })
     expect(await reader.readAtOrBefore(LAST_UPDATE + 1_000n)).toMatchObject({ blockNumber: 500n })
+    expect(fetchMarket).toHaveBeenLastCalledWith(marketId, expect.anything(), {
+      blockNumber: 500n,
+      deployless: false
+    })
+  })
+
+  test('rejects a target older than the chain instead of reading genesis state', async () => {
+    fetchMarket.mockResolvedValue(funded(1_000_000_000n))
+    const reader = createBlueReferenceReader(
+      marketId,
+      client(1_000n, block => LAST_UPDATE + block * 2n) as never,
+      BASE_CHAIN_ID
+    )
+
+    await expect(reader.readAtOrBefore(LAST_UPDATE - 1n)).rejects.toMatchObject({
+      operation: 'reference-history'
+    })
+    expect(fetchMarket).not.toHaveBeenCalled()
   })
 
   test('rejects a provider whose latest block carries no number', async () => {
-    const reader = createBlueReferenceReader(marketId, {
-      getBlock: async () => ({ number: null, timestamp: 0n })
-    } as never)
+    const reader = createBlueReferenceReader(
+      marketId,
+      { getBlock: async () => ({ number: null, timestamp: 0n }) } as never,
+      BASE_CHAIN_ID
+    )
 
     await expect(reader.readLatest()).rejects.toMatchObject({ operation: 'latest-block' })
   })

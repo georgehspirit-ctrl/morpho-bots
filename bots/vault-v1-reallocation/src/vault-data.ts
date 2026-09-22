@@ -3,6 +3,7 @@ import type { BatchLensTransportType } from '@repo/utils'
 import type { Address, Client, Hex, Transport } from 'viem'
 
 import { getChainAddresses } from '@morpho-org/blue-sdk'
+import { advanceRateAtTarget } from '@repo/utils'
 import { isAddressEqual, zeroAddress } from 'viem'
 
 import { readVaultV1Lens } from './state/lens.sol'
@@ -64,31 +65,45 @@ const isAdaptiveCurveMarket = (irm: Address, rateAtTarget: bigint, chainId: numb
   rateAtTarget > 0n && isAddressEqual(irm, getChainAddresses(chainId).adaptiveCurveIrm)
 
 /**
- * Reads one vault's full reallocation input — roles, withdraw queue, and per-market Blue state, cap,
- * position, and `rateAtTarget` — in a single deployless `eth_call` pinned to `blockNumber`, so the
- * snapshot is coherent across markets and reproducible. The lens accrues each market on-chain inside
- * that call, so there is no client-side accrual and no block-timestamp handling here.
+ * Reads EVERY given vault's full reallocation input — roles, withdraw queue, and per-market Blue
+ * state, cap, position, and `rateAtTarget` — in ONE deployless `eth_call` pinned to `blockNumber`,
+ * so the snapshot is coherent across vaults and markets alike. The lens projects each market's
+ * accrual read-only inside that call; only the IRM's `rateAtTarget` is finished off here, by
+ * {@link advanceRateAtTarget} from `@repo/utils`.
  *
- * A revert inside the lens propagates as-is; the tick catches it per vault.
+ * Keyed by lower-cased vault address. A vault the lens declined is absent rather than throwing —
+ * the reader's `declined: 'throw'` default means that can only happen if the envelope itself could
+ * not serve it, which the tick reports per vault.
  */
-export const fetchVaultData = async (
+export const fetchVaults = async (
   client: Client<Transport<BatchLensTransportType>>,
-  vault: Address,
+  vaults: readonly Address[],
   { chainId, blockNumber, eoa }: { chainId: number; blockNumber: bigint; eoa: Address }
-): Promise<VaultData> => {
+): Promise<Map<string, VaultData>> => {
   const { morpho, adaptiveCurveIrm } = getChainAddresses(chainId)
   const rows = await readVaultV1Lens(
     client,
     { morpho, adaptiveCurveIrm },
-    [{ vault, eoa }],
+    vaults.map(vault => ({ vault, eoa })),
     blockNumber
   )
-  // `readDeploylessBatchLens` returns exactly one row per input element, keyed by this same function.
-  const row = rows.get(vault.toLowerCase())!
+  return new Map(
+    vaults
+      .map(vault => [vault, rows.get(vault.toLowerCase())] as const)
+      .filter((entry): entry is readonly [Address, NonNullable<(typeof entry)[1]>] => !!entry[1])
+      .map(([vault, row]) => [vault.toLowerCase(), toVaultData(vault, row, chainId)])
+  )
+}
 
+const toVaultData = (
+  vault: Address,
+  row: Awaited<ReturnType<typeof readVaultV1Lens>> extends Map<string, infer R> ? R : never,
+  chainId: number
+): VaultData => {
   // The lens walks `withdrawQueue` in order, so array order is withdraw-queue order.
-  const marketsData = row.markets.map(
-    (market): VaultMarketData => ({
+  const marketsData = row.markets.map((market): VaultMarketData => {
+    const rateAtTarget = advanceRateAtTarget(market)
+    return {
       id: market.id,
       params: market.params,
       state: {
@@ -97,11 +112,11 @@ export const fetchVaultData = async (
       },
       cap: market.cap,
       vaultAssets: market.vaultAssets,
-      rateAtTarget: market.rateAtTarget,
-      isAdaptiveCurve: isAdaptiveCurveMarket(market.params.irm, market.rateAtTarget, chainId),
+      rateAtTarget,
+      isAdaptiveCurve: isAdaptiveCurveMarket(market.params.irm, rateAtTarget, chainId),
       isIdle: isAddressEqual(market.params.collateralToken, zeroAddress)
-    })
-  )
+    }
+  })
 
   return {
     vaultAddress: vault,

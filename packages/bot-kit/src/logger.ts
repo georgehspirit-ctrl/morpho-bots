@@ -9,6 +9,15 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export type Logger = Record<LogLevel, (event: string, fields?: Record<string, unknown>) => void>
 
+/**
+ * What {@link createLogger} returns: the event-shaped facade, plus the underlying `LogLayer` for the
+ * one consumer that needs it — viem-dlc's `withLogging`, which emits its own wide events through a
+ * logger you hand it rather than through our `(event, fields)` shape.
+ *
+ * Test doubles can stay plain {@link Logger}; only a caller reaching for `layer` needs this.
+ */
+export type BotLogger = Logger & { readonly layer: LogLayer }
+
 const LEVEL_RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 }
 
 /** Fields bound once and stamped onto every line — the wide-log context (e.g. bot, chainId). */
@@ -145,7 +154,7 @@ function betterStackTransport(
 export function createLogger(
   minLevel: LogLevel = 'info',
   options: CreateLoggerOptions = {}
-): Logger {
+): BotLogger {
   const threshold = LEVEL_RANK[minLevel]
   const env = options.env ?? process.env
 
@@ -155,6 +164,10 @@ export function createLogger(
     : [stderrTransport()]
 
   const layer = new LogLayer({ transport: transports })
+  // The facade below enforces `minLevel` itself, but viem-dlc is handed the raw layer and calls
+  // `.info()` on it directly — so the threshold has to live on the layer too, or wide events would
+  // ignore LOG_LEVEL entirely.
+  layer.setLevel(minLevel)
   if (options.context) layer.withContext(toJsonSafe(options.context))
 
   const emit =
@@ -165,5 +178,11 @@ export function createLogger(
       layer.withMetadata(toJsonSafe(fields))[level](event)
     }
 
-  return { debug: emit('debug'), info: emit('info'), warn: emit('warn'), error: emit('error') }
+  return {
+    debug: emit('debug'),
+    info: emit('info'),
+    warn: emit('warn'),
+    error: emit('error'),
+    layer
+  }
 }

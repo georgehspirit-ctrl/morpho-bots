@@ -67,6 +67,8 @@ const authoritativeSetterRatifierRuntime = (
   await readFile(new URL('../../fixtures/setter-ratifier-base.hex', import.meta.url), 'utf8')
 ).trim() as Hex
 
+const REFERENCE_SECONDS_PER_BLOCK = 2n
+
 const createState = (
   responses: Record<string, unknown>,
   overrides: {
@@ -142,7 +144,10 @@ const createState = (
       calls.push(blockTag ?? String(blockNumber))
       return blockTag === 'latest'
         ? { number: 100n, timestamp: 1_000n }
-        : { number: blockNumber ?? null, timestamp: 998n }
+        : {
+            number: blockNumber ?? null,
+            timestamp: 1_000n - (100n - (blockNumber ?? 0n)) * REFERENCE_SECONDS_PER_BLOCK
+          }
     },
     readContract: async (parameters: Record<string, unknown>) => {
       const { functionName, args, blockNumber } = parameters
@@ -764,6 +769,16 @@ describe('ViemSetupStateService', () => {
       `market:${referenceMarketId}:90`,
       `market:${referenceMarketId}:100`
     ])
+  })
+
+  test('fails closed when the archive holds no block as old as the configured window', async () => {
+    const { state, calls } = createState({}, { referenceLookbackSeconds: 1_000n })
+
+    const error = await state.checkReference().catch(value => value)
+
+    expect(error).toBeInstanceOf(ProviderResponseError)
+    expect(error).toMatchObject({ provider: 'archive-rpc', operation: 'reference-history' })
+    expect(calls).toEqual(['latest', '0'])
   })
 
   test('fails closed when the configured reference market has no historical state', async () => {

@@ -5,7 +5,6 @@ import { describe, expect, test } from 'vitest'
 
 import {
   BASE_CHAIN_ID,
-  referenceLookbackBlocks,
   isSupportedChainId,
   MAINNET_CHAIN_ID,
   observabilityChainId,
@@ -106,38 +105,6 @@ describe('ratifierRuntimeHash', () => {
       expect(ratifierRuntimeHash(MAINNET_CHAIN_ID, type)).not.toBe(
         ratifierRuntimeHash(BASE_CHAIN_ID, type)
       )
-    }
-  })
-})
-
-describe('referenceLookbackBlocks', () => {
-  test('converts the configured window at each chain cadence', () => {
-    // A fixed block count is chain-specific. 10,800 blocks is six hours at Base's two-second
-    // cadence but ~36 hours at Ethereum's twelve seconds, which made setup inspect far older state
-    // than the rate reader needs and fail readiness for a recently funded reference market.
-    expect(referenceLookbackBlocks(BASE_CHAIN_ID, 259_200n)).toBe(129_600n)
-    expect(referenceLookbackBlocks(MAINNET_CHAIN_ID, 259_200n)).toBe(21_600n)
-    expect(referenceLookbackBlocks(BASE_CHAIN_ID, 21_600n)).toBe(10_800n)
-    expect(referenceLookbackBlocks(MAINNET_CHAIN_ID, 21_600n)).toBe(1_800n)
-  })
-
-  test('rounds up so readiness never probes shallower than the reader reads', () => {
-    expect(referenceLookbackBlocks(BASE_CHAIN_ID, 5n)).toBe(3n)
-    expect(referenceLookbackBlocks(MAINNET_CHAIN_ID, 13n)).toBe(2n)
-    expect(referenceLookbackBlocks(BASE_CHAIN_ID, 1n)).toBe(1n)
-  })
-
-  test('covers at least the configured window on every supported chain', () => {
-    // Iterating the registry rather than a literal pair, so a newly supported chain whose cadence
-    // is sub-second or not a whole number of seconds must satisfy the coverage guarantee here
-    // rather than under-probing at runtime.
-    for (const chainId of SUPPORTED_CHAIN_IDS) {
-      const secondsPerBlock = BigInt(supportedChain(chainId).blockTime) / 1000n
-      for (const lookbackSeconds of [3_600n, 21_600n, 250_000n, 259_200n, 2_592_000n]) {
-        expect(
-          referenceLookbackBlocks(chainId, lookbackSeconds) * secondsPerBlock
-        ).toBeGreaterThanOrEqual(lookbackSeconds)
-      }
     }
   })
 })

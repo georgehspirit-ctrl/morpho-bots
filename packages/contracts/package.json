@@ -8,7 +8,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./solidity/*": "./solidity/*"
   },
   "scripts": {
     "generate": "tsx scripts/codegen.ts && oxfmt src/abis.ts src/contracts.ts",

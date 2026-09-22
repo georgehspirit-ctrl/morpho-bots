@@ -43,7 +43,7 @@ describe('VaultV2ReallocationLens', () => {
     }
   })
 
-  it('exposes a single-array-in / single-array-out lens entrypoint', () => {
+  it('exposes a single-element-in / single-value-out per-item entrypoint', () => {
     // The struct shape is what lets viem encode/decode natively (no hand-written ABI). It also
     // guards the backtick-truncation footgun: a stray backtick in a Solidity comment terminates the
     // sol``` template early, silently yielding an empty ABI — this would then find no `lens`.
@@ -51,17 +51,18 @@ describe('VaultV2ReallocationLens', () => {
     const lens = abi.find(item => item.type === 'function' && item.name === 'lens')
     expect(lens).toBeDefined()
     expect(lens?.inputs).toHaveLength(1)
-    expect(lens?.inputs[0]?.type).toBe('tuple[]')
+    expect(lens?.inputs[0]?.type).toBe('tuple')
     expect(lens?.outputs).toHaveLength(1)
-    expect(lens?.outputs[0]?.type).toBe('tuple[]')
+    expect(lens?.outputs[0]?.type).toBe('tuple')
   })
 
-  it('declares the entrypoint state-changing, since it accrues interest on-chain', () => {
-    // The accrual is the whole point of the lens — if this ever reads `view`, the `accrueInterest`
-    // call was dropped and the snapshot silently reverted to pre-accrual state.
+  it('declares the entrypoint view, as the deployless envelope requires', () => {
+    // viem-dlc dispatches each element with STATICCALL, so a `nonpayable` entrypoint would revert
+    // every element into `skipped` rather than returning data. This guards the whole read-only
+    // accrual projection: if a state-changing call creeps back in, this flips first.
     const { abi } = compiled()
     const lens = abi.find(item => item.type === 'function' && item.name === 'lens')
-    expect(lens?.stateMutability).toBe('nonpayable')
+    expect(lens?.stateMutability).toBe('view')
   })
 
   it('round-trips a VaultOut through the soltag-generated ABI in field order', () => {
@@ -88,17 +89,20 @@ describe('VaultV2ReallocationLens', () => {
             lltv: parseUnits('0.86', 18)
           },
           totalSupplyAssets: parseUnits('1000000', 6),
+          totalSupplyShares: parseUnits('1000000', 12),
           totalBorrowAssets: parseUnits('900000', 6),
           cap: capsOut(100n),
           collateralCap: capsOut(200n),
           vaultAssets: parseUnits('250000', 6),
-          rateAtTarget: 951293759n
+          rateAtTargetStored: 951293759n,
+          utilizationBefore: parseUnits('0.5', 18),
+          elapsed: 3600n
         }
       ]
     }
-    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: [sample] })
+    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: sample })
     const decoded = decodeFunctionResult({ abi, functionName: 'lens', data: encoded })
-    expect(decoded).toEqual([sample])
+    expect(decoded).toEqual(sample)
   })
 
   it('decodes a non-VaultV2 row as zeroed fields for the fetcher to reject', () => {
@@ -114,7 +118,7 @@ describe('VaultV2ReallocationLens', () => {
       adapterCap: { absoluteCap: 0n, relativeCap: 0n, allocation: 0n },
       markets: []
     }
-    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: [sample] })
-    expect(decodeFunctionResult({ abi, functionName: 'lens', data: encoded })).toEqual([sample])
+    const encoded = encodeFunctionResult({ abi, functionName: 'lens', result: sample })
+    expect(decodeFunctionResult({ abi, functionName: 'lens', data: encoded })).toEqual(sample)
   })
 })

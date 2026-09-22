@@ -554,7 +554,8 @@ export const createProductionLadderAdapters = (
   const blueRates = new BlueBootstrapReferenceRateService(
     createBlueReferenceReader(
       config.setup.referenceMarketId ?? config.setup.marketIds[0]!,
-      referenceClient as HistoricalBlockReader
+      referenceClient as HistoricalBlockReader,
+      config.chainId
     ),
     config.referenceLookbackSeconds
   )

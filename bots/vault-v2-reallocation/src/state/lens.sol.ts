@@ -1,12 +1,8 @@
 import type { InputMarketParams } from '@morpho-org/blue-sdk'
 import type { Address, Client, Hex, Transport } from 'viem'
 
-import {
-  type BatchLensTransportType,
-  MAX_INITCODE_SIZE,
-  readDeploylessBatchLens
-} from '@repo/utils'
-import { sol } from 'soltag'
+import { type BatchLensTransportType, readDeploylessBatchLens } from '@repo/utils'
+import { sol, solFile } from 'soltag'
 
 // Single-file soltag lens: reads everything a reallocation pass needs for a batch of vaults inside
 // ONE eth_call against one pinned block — the VaultV2 factory identity, the EOA's allocator bit,
@@ -34,6 +30,8 @@ export const VaultV2ReallocationLens = sol('VaultV2ReallocationLens')`
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.19;
 
+${solFile('@repo/contracts/solidity/morpho/BalancesMath.sol')}
+
 struct MarketParams { address loanToken; address collateralToken; address oracle; address irm; uint256 lltv; }
 struct Market {
   uint128 totalSupplyAssets;
@@ -49,7 +47,11 @@ interface IMorpho {
   function market(bytes32 id) external view returns (Market memory);
   function position(bytes32 id, address user) external view returns (Position memory);
   function idToMarketParams(bytes32 id) external view returns (MarketParams memory);
-  function accrueInterest(MarketParams memory marketParams) external;
+  function feeRecipient() external view returns (address);
+}
+
+interface IIrm {
+  function borrowRateView(MarketParams memory marketParams, Market memory market) external view returns (uint256);
 }
 
 interface IVaultV2 {
@@ -112,12 +114,15 @@ contract VaultV2ReallocationLens {
     bytes32 id;
     bytes32 capId;               // keccak256(abi.encode("this/marketParams", adapter, params))
     MarketParams params;
-    uint256 totalSupplyAssets;   // post-accrual
-    uint256 totalBorrowAssets;   // post-accrual
+    uint256 totalSupplyAssets;   // projected
+    uint256 totalSupplyShares;   // projected, fee-diluted
+    uint256 totalBorrowAssets;   // projected
     CapsOut cap;                 // the market's own cap id
     CapsOut collateralCap;       // keccak256(abi.encode("collateralToken", collateral)); deduped client-side
-    uint256 vaultAssets;         // the adapter's supply shares converted down, post-accrual
-    uint256 rateAtTarget;        // 0 unless irm is the chain's canonical AdaptiveCurveIRM
+    uint256 vaultAssets;         // the adapter's supply shares converted down, projected
+    uint256 rateAtTargetStored;  // PRE-projection; 0 unless irm is the canonical AdaptiveCurveIRM
+    uint256 utilizationBefore;   // pre-projection utilization (WAD), input to the rateAtTarget advance
+    uint256 elapsed;             // block.timestamp - market.lastUpdate, the advance's other input
   }
 
   struct VaultOut {
@@ -146,16 +151,31 @@ contract VaultV2ReallocationLens {
 
   // SharesMathLib.toAssetsDown: the adapter's own position, rounded against the vault.
   function _toAssetsDown(uint256 shares, uint256 totalAssets, uint256 totalShares) internal pure returns (uint256) {
-    return (shares * (totalAssets + VIRTUAL_ASSETS)) / (totalShares + VIRTUAL_SHARES);
+    return SharesMathLib.toAssetsDown(shares, totalAssets, totalShares);
   }
 
-  // No per-element try/catch, unlike the liquidation lenses: the fetcher submits one vault per call,
-  // so a revert IS that vault's failure and the real reason should reach the tick's vault.error log
-  // rather than being flattened into a valid=false row.
-  function lens(Input[] calldata input) external returns (VaultOut[] memory output) {
-    output = new VaultOut[](input.length);
-    for (uint256 i = 0; i < input.length; i++) output[i] = _readVault(input[i]);
+  // MorphoBalancesLib.expectedMarketBalances, applied in place. Mirrors upstream's guards exactly:
+  // no interest when no time passed, nothing borrowed, or no IRM.
+  function _project(Market memory m, MarketParams memory params, uint256 elapsed) internal view {
+    if (elapsed == 0 || m.totalBorrowAssets == 0 || params.irm == address(0)) return;
+
+    uint256 borrowRate = IIrm(params.irm).borrowRateView(params, m);
+    uint256 interest = MathLib.wMulDown(m.totalBorrowAssets, MathLib.wTaylorCompounded(borrowRate, elapsed));
+    m.totalBorrowAssets += SafeCastLib.toUint128(interest);
+    m.totalSupplyAssets += SafeCastLib.toUint128(interest);
+
+    if (m.fee != 0) {
+      uint256 feeAmount = MathLib.wMulDown(interest, m.fee);
+      // feeAmount is subtracted from total supply here to compensate for it already being added.
+      uint256 feeShares = SharesMathLib.toSharesDown(feeAmount, m.totalSupplyAssets - feeAmount, m.totalSupplyShares);
+      m.totalSupplyShares += SafeCastLib.toUint128(feeShares);
+    }
   }
+
+  // The per-item entrypoint viem-dlc's envelope calls once per element. No inner try/catch, unlike
+  // the liquidation lenses: no whitelisted vault is expected to be unreadable, so a revert IS that
+  // vault's failure and the reader's declined:'throw' default surfaces it rather than dropping a row.
+  // A non-VaultV2 address is data, not a failure — it comes back as isVaultV2=false.
 
   function _adapterKind(address adapter) internal view returns (uint8) {
     if (
@@ -177,7 +197,7 @@ contract VaultV2ReallocationLens {
     });
   }
 
-  function _readVault(Input calldata e) internal returns (VaultOut memory o) {
+  function lens(Input calldata e) external view returns (VaultOut memory o) {
     o.isVaultV2 = VAULT_V2_FACTORY.isVaultV2(e.vault);
     // Nothing else about a non-factory address is safe to call; the fetcher rejects on this bit.
     if (!o.isVaultV2) return o;
@@ -210,11 +230,19 @@ contract VaultV2ReallocationLens {
       o.adapterCap = _caps(vault, keccak256(abi.encode("this", qualified.adapter)));
     }
 
-    // AFTER the per-market accruals — accrueInterestView folds the adapters' realAssets.
+    // Unaffected by the switch to a read-only projection: totalAssets folds each adapter's
+    // realAssets, which already projects interest itself rather than relying on a prior accrual.
     o.totalAssets = vault.totalAssets();
   }
 
-  function _readV1Markets(IVaultV2 vault, address adapter) internal returns (MarketOut[] memory markets) {
+  function _readV1Markets(IVaultV2 vault, address adapter) internal view returns (MarketOut[] memory markets) {
+    // Fail closed, but only for the generation this can bite. The legacy adapter holds a Blue
+    // POSITION, and Blue credits the fee recipient's position with the fee shares this projection
+    // only mints into the market total — so vaultAssets would read low for exactly that adapter.
+    // MorphoMarketV1AdapterV2 keeps its own supplyShares, which Blue's accrual never touches, so
+    // rejecting it too would be downtime for nothing.
+    require(adapter != MORPHO.feeRecipient(), "adapter is fee recipient");
+
     uint256 length = IMarketV1Adapter(adapter).marketParamsListLength();
     markets = new MarketOut[](length);
     for (uint256 i = 0; i < length; i++) {
@@ -225,7 +253,7 @@ contract VaultV2ReallocationLens {
     }
   }
 
-  function _readV2Markets(IVaultV2 vault, address adapter) internal returns (MarketOut[] memory markets) {
+  function _readV2Markets(IVaultV2 vault, address adapter) internal view returns (MarketOut[] memory markets) {
     uint256 length = IMarketV1AdapterV2(adapter).marketIdsLength();
     markets = new MarketOut[](length);
     for (uint256 i = 0; i < length; i++) {
@@ -246,23 +274,28 @@ contract VaultV2ReallocationLens {
     bytes32 id,
     MarketParams memory params,
     uint256 shares
-  ) internal returns (MarketOut memory o) {
-    // Accrue FIRST. Every read after this line — the market totals, the adapter's assets, and the
-    // IRM's STORED rateAtTarget, which only advances when Blue calls borrowRate — is then the
-    // exact on-chain state at this block, with no client-side accrual to keep in sync.
-    MORPHO.accrueInterest(params);
+  ) internal view returns (MarketOut memory o) {
     Market memory m = MORPHO.market(id);
 
     o.id = id;
     o.params = params;
-    o.totalSupplyAssets = m.totalSupplyAssets;
-    o.totalBorrowAssets = m.totalBorrowAssets;
-    o.vaultAssets = _toAssetsDown(shares, m.totalSupplyAssets, m.totalSupplyShares);
+    o.elapsed = block.timestamp - m.lastUpdate;
+    o.utilizationBefore =
+      m.totalSupplyAssets == 0 ? 0 : MathLib.wDivDown(m.totalBorrowAssets, m.totalSupplyAssets);
 
+    // Read BEFORE projecting: this is the IRM's stored value, which only Blue calling borrowRate
+    // advances. The fetcher finishes the advance with AdaptiveCurveIrmLib.
     if (params.irm == ADAPTIVE_CURVE_IRM) {
       int256 signedRate = IAdaptiveCurveIrm(params.irm).rateAtTarget(id);
-      if (signedRate > 0) o.rateAtTarget = uint256(signedRate);
+      if (signedRate > 0) o.rateAtTargetStored = uint256(signedRate);
     }
+
+    _project(m, params, o.elapsed);
+
+    o.totalSupplyAssets = m.totalSupplyAssets;
+    o.totalSupplyShares = m.totalSupplyShares;
+    o.totalBorrowAssets = m.totalBorrowAssets;
+    o.vaultAssets = _toAssetsDown(shares, m.totalSupplyAssets, m.totalSupplyShares);
 
     o.capId = keccak256(abi.encode("this/marketParams", adapter, params));
     o.cap = _caps(vault, o.capId);
@@ -293,11 +326,19 @@ export type LensMarketOut = {
   capId: Hex
   params: InputMarketParams
   totalSupplyAssets: bigint
+  totalSupplyShares: bigint
   totalBorrowAssets: bigint
   cap: LensCapsOut
   collateralCap: LensCapsOut
   vaultAssets: bigint
-  rateAtTarget: bigint
+  /**
+   * The IRM's **stored** rate at target, before accrual — only Blue calling `borrowRate` advances
+   * it, which a read-only lens cannot do. `fetchVaultV2Data` finishes the advance with
+   * `AdaptiveCurveIrmLib`; nothing else should read this field raw.
+   */
+  rateAtTargetStored: bigint
+  utilizationBefore: bigint
+  elapsed: bigint
 }
 
 /** The decoded Solidity `VaultOut` struct. */
@@ -341,28 +382,20 @@ export const readVaultV2Lens = async (
     addresses.marketV1AdapterFactory,
     addresses.marketV1AdapterV2Factory
   )
-  return readDeploylessBatchLens(
+  // No `batch.gas`: the old polynomial fit does not carry over (the new model's `fixed` excludes the
+  // copy of the chunk's own bytes, where `constant` folded in CREATE overhead), and a model viem-dlc
+  // rejects as malformed is ignored silently in favour of packing by bytes. A chunk resizes from what
+  // its own pages report, so stating nothing costs continuation round trips and never a result.
+  // Populate from the wide event's `fixed_gas` / `item_gas_avg` / `item_gas_stddev` once observed.
+  return readDeploylessBatchLens({
     client,
-    {
+    parameters: {
       ...compiled,
       functionName: 'lens',
-      args: [vaults],
-      blockNumber,
-      batch: {
-        batchSize: MAX_INITCODE_SIZE,
-        exfil: 'revert',
-        compress: false,
-        // A vault is a coarse batch element: it fans out ~11 sub-calls per market (params/id,
-        // accrual, market, position or supplyShares, rateAtTarget, and six cap reads) plus the
-        // vault-level reads, and `totalAssets()` re-walks every adapter's realAssets on top —
-        // `accrueInterest` is the expensive one (IRM borrowRate + storage writes). `linear`
-        // budgets a deep market list; `constant` folds in the deployless CREATE + code-deposit
-        // overhead. Under-budgeting is self-correcting — viem-dlc's chunker halve-and-retries any
-        // batch over the RPC gas cap — and the production fetcher submits one vault per call anyway.
-        gas: { default: { constant: 2_000_000, linear: 8_000_000, quadratic: 0 } }
-      }
+      args: vaults,
+      blockNumber
     },
-    ({ vault }) => vault.toLowerCase(),
-    (_input, out): LensVaultOut => out
-  )
+    key: ({ vault }) => vault.toLowerCase(),
+    value: (_input, out): LensVaultOut => out
+  })
 }

@@ -1,0 +1,134 @@
+import { sol } from 'soltag'
+
+// THE PRE-PROJECTION LENS, PRESERVED VERBATIM AS A TEST FIXTURE. Do not "fix", reformat, or point it
+// at the vendored math — its whole value is being an independent oracle for
+// `reallocation-accrual.fork.test.ts`, which diffs the production lens against it at a pinned block.
+// It calls the state-changing `Morpho.accrueInterest`, so Blue itself does the accrual and the IRM
+// advances its own `rateAtTarget`; that is precisely what production no longer does.
+//
+// It stays readable on viem-dlc 0.0.19: it is `nonpayable`, so it can never travel through the
+// paginated-lens envelope (which STATICCALLs each element), but an unmarked deployless `eth_call`
+// carries no `policy` sentinel and the transport forwards it untouched. It must be read with
+// low-level `call` + encode/decode, since viem's `readContract` only accepts view/pure ABI entries.
+export const VaultV1AccrualReferenceLens = sol('VaultV1AccrualReferenceLens')`
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity ^0.8.19;
+
+struct MarketParams { address loanToken; address collateralToken; address oracle; address irm; uint256 lltv; }
+struct Market {
+  uint128 totalSupplyAssets;
+  uint128 totalSupplyShares;
+  uint128 totalBorrowAssets;
+  uint128 totalBorrowShares;
+  uint128 lastUpdate;
+  uint128 fee;
+}
+struct Position { uint256 supplyShares; uint128 borrowShares; uint128 collateral; }
+
+interface IMorpho {
+  function market(bytes32 id) external view returns (Market memory);
+  function position(bytes32 id, address user) external view returns (Position memory);
+  function idToMarketParams(bytes32 id) external view returns (MarketParams memory);
+  function accrueInterest(MarketParams memory marketParams) external;
+}
+
+interface IMetaMorpho {
+  function owner() external view returns (address);
+  function curator() external view returns (address);
+  function isAllocator(address target) external view returns (bool);
+  function withdrawQueueLength() external view returns (uint256);
+  function withdrawQueue(uint256 index) external view returns (bytes32);
+  function config(bytes32 id) external view returns (uint184 cap, bool enabled, uint64 removableAt);
+}
+
+interface IAdaptiveCurveIrm { function rateAtTarget(bytes32 id) external view returns (int256); }
+
+contract VaultV1AccrualReferenceLens {
+  uint256 internal constant VIRTUAL_SHARES = 1e6;
+  uint256 internal constant VIRTUAL_ASSETS = 1;
+
+  IMorpho public immutable MORPHO;
+  address public immutable ADAPTIVE_CURVE_IRM;
+
+  // One vault, plus the EOA whose allocator role is being probed. Role data rides the same call as
+  // the market snapshot, so the tick needs no separate isAllocator read.
+  struct Input { address vault; address eoa; }
+
+  struct MarketOut {
+    bytes32 id;
+    MarketParams params;
+    uint256 totalSupplyAssets;   // post-accrual
+    uint256 totalSupplyShares;   // post-accrual, fee-diluted by Blue itself
+    uint256 totalBorrowAssets;   // post-accrual
+    uint256 elapsed;             // block.timestamp - lastUpdate BEFORE accrual
+    uint256 cap;                 // the vault's config(id).cap
+    uint256 vaultAssets;         // the vault's supplyShares converted down, post-accrual
+    uint256 rateAtTarget;        // 0 unless irm is the chain's canonical AdaptiveCurveIRM
+  }
+
+  struct VaultOut {
+    address owner;
+    address curator;
+    bool isAllocator;
+    MarketOut[] markets;         // withdraw-queue order
+  }
+
+  constructor(IMorpho morpho, address adaptiveCurveIrm) {
+    MORPHO = morpho;
+    ADAPTIVE_CURVE_IRM = adaptiveCurveIrm;
+  }
+
+  // SharesMathLib.toAssetsDown: the vault's own position, rounded against the vault.
+  function _toAssetsDown(uint256 shares, uint256 totalAssets, uint256 totalShares) internal pure returns (uint256) {
+    return (shares * (totalAssets + VIRTUAL_ASSETS)) / (totalShares + VIRTUAL_SHARES);
+  }
+
+  // No per-element try/catch, unlike the liquidation lenses: the fetcher submits one vault per call,
+  // so a revert IS that vault's failure and the real reason should reach the tick's vault.error log
+  // rather than being flattened into a valid=false row.
+  function lens(Input[] calldata input) external returns (VaultOut[] memory output) {
+    output = new VaultOut[](input.length);
+    for (uint256 i = 0; i < input.length; i++) output[i] = _readVault(input[i]);
+  }
+
+  function _readVault(Input calldata e) internal returns (VaultOut memory o) {
+    IMetaMorpho vault = IMetaMorpho(e.vault);
+    o.owner = vault.owner();
+    o.curator = vault.curator();
+    o.isAllocator = vault.isAllocator(e.eoa);
+
+    uint256 length = vault.withdrawQueueLength();
+    o.markets = new MarketOut[](length);
+    for (uint256 i = 0; i < length; i++) {
+      bytes32 id = vault.withdrawQueue(i);
+      MarketParams memory params = MORPHO.idToMarketParams(id);
+      uint256 elapsedBefore = block.timestamp - MORPHO.market(id).lastUpdate;
+      // Accrue FIRST. Every read after this line — the market totals, the vault's assets, and the
+      // IRM's STORED rateAtTarget, which only advances when Blue calls borrowRate — is then the
+      // exact on-chain state at this block, with no client-side accrual to keep in sync.
+      MORPHO.accrueInterest(params);
+      Market memory m = MORPHO.market(id);
+      Position memory p = MORPHO.position(id, e.vault);
+      (uint184 cap,,) = vault.config(id);
+
+      uint256 rate = 0;
+      if (params.irm == ADAPTIVE_CURVE_IRM) {
+        int256 signedRate = IAdaptiveCurveIrm(params.irm).rateAtTarget(id);
+        if (signedRate > 0) rate = uint256(signedRate);
+      }
+
+      o.markets[i] = MarketOut({
+        id: id,
+        params: params,
+        totalSupplyAssets: m.totalSupplyAssets,
+        totalSupplyShares: m.totalSupplyShares,
+        totalBorrowAssets: m.totalBorrowAssets,
+        elapsed: elapsedBefore,
+        cap: cap,
+        vaultAssets: _toAssetsDown(p.supplyShares, m.totalSupplyAssets, m.totalSupplyShares),
+        rateAtTarget: rate
+      });
+    }
+  }
+}
+`

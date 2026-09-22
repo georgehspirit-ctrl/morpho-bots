@@ -1,5 +1,7 @@
 import type { Address, Hex } from 'viem'
 
+import type { OperatorAdapterOperation } from '../operator-error-name.utils'
+
 /**
  * Version of the shipped event contract, bound once into logger context rather than onto each record.
  * @remarks Bump on any breaking field rename or removal so a consumer can pin. Adding an optional
@@ -25,9 +27,10 @@ export type MonitoringSide = 'lower' | 'higher'
  *   strings because the bot-kit logger flattens `bigint` before shipping. The bot never reads token
  *   decimals, so no field is human-scaled.
  * - **Cardinality.** Only `workflow`, `marketId`, `side`, `status`, `stage`, `action`, `reason`,
- *   `check`, `bound`, `cap`, `operation`, `state`, and `referenceMode` may be used as
- *   grouping dimensions. `txHash` and `groupId` are unbounded trace-only correlation fields and must
- *   never be grouped on. Error text never appears — only allowlisted `errorName` classifications.
+ *   `check`, `bound`, `cap`, `operation`, `state`, `referenceMode`, and `adapterOperation` may be
+ *   used as grouping dimensions; `adapterOperation` is an allowlisted literal, never provider text.
+ *   `txHash` and `groupId` are unbounded trace-only correlation fields and must never be grouped on.
+ *   Error text never appears — only allowlisted `errorName` classifications.
  */
 export type MonitoringEvent =
   | {
@@ -60,6 +63,7 @@ export type MonitoringEvent =
       reason?: string
       durationMs?: number
       errorName?: string
+      adapterOperation?: OperatorAdapterOperation
     }
   | {
       event: 'guardrail.rate-clamped'
@@ -122,6 +126,7 @@ export type MonitoringEvent =
       stage: string
       reason: string
       strategyInvalidated: boolean
+      adapterOperation?: OperatorAdapterOperation
     }
   | {
       event: 'reference.observed'
@@ -253,3 +258,13 @@ export const isShippableRecord = (value: unknown) =>
   value !== null &&
   !Array.isArray(value) &&
   shippableEvents.has(String((value as { event?: unknown }).event))
+
+/**
+ * Projects a sanitized result's allowlisted adapter operation into an optional shipped field.
+ * @param result - Sanitized workflow result carrying an optional allowlisted adapter operation.
+ * @returns The adapter-operation field when present, otherwise an empty object.
+ */
+export const adapterOperationOf = (result: {
+  marketId: Hex
+  adapterOperation?: OperatorAdapterOperation
+}) => (result.adapterOperation === undefined ? {} : { adapterOperation: result.adapterOperation })

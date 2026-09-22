@@ -1,7 +1,7 @@
 import type { BatchLensTransportType } from '@repo/utils'
 import type { Address, Client, Hex, Transport } from 'viem'
 
-import { lensKey, MAX_INITCODE_SIZE, readDeploylessBatchLens } from '@repo/utils'
+import { lensKey, readDeploylessBatchLens } from '@repo/utils'
 import { sol } from 'soltag'
 
 import type { Market } from '../execution/encode-call'
@@ -92,23 +92,29 @@ contract MidnightLiquidationLens {
     while (bitmap != 0) { res += bitmap & 1; bitmap >>= 1; }
   }
 
-  function lens(Input[] calldata input) external view returns (LensOut[] memory output) {
-    output = new LensOut[](input.length);
-    for (uint256 i = 0; i < input.length; i++) {
-      // Per-element isolation: a revert (bad oracle, unknown id) leaves output[i] as a zeroed
-      // LensOut (valid=false) instead of reverting the whole batch. computeOne is external view, so
-      // the self-call is a STATICCALL and cannot mutate state.
-      try this.computeOne(input[i]) returns (LensOut memory o) {
-        output[i] = o;
-      } catch {
-        // output[i] keeps its zeroed (valid=false) default.
-      }
+  // Must not revert for an input it simply cannot price: a declined element is indistinguishable
+  // from one the provider refused, so an unpriceable input is data (valid=false) and a revert is
+  // left to mean something is wrong.
+  //
+  // Running out of gas is NOT such an input. EIP-150 keeps 1/64 of the forwarded gas in this frame,
+  // so a child that died of gas still lets the catch run and would be recorded as a SERVED
+  // valid=false row — which the envelope never retries and declined:'throw' cannot see, silently
+  // dropping the position from the liquidation set. Returndata cannot tell the two apart, but gas
+  // can: a child that consumed essentially its whole allowance ran out, so re-revert and let the
+  // element be declined (loud) rather than answered wrongly (silent).
+  function computeOne(Input calldata e) external view returns (LensOut memory o) {
+    uint256 forwarded = gasleft();
+    try this.computeOneInner(e) returns (LensOut memory r) {
+      o = r;
+    } catch {
+      if (gasleft() < forwarded / 32) revert();
+      // o keeps its zeroed (valid=false) default.
     }
   }
 
-  function computeOne(Input calldata e) external view returns (LensOut memory o) {
-    // Reverts MarketNotCreated for an unknown id — caught by lens()'s per-element try/catch, which
-    // leaves a zeroed (valid=false) row. A successful read is the canonical Market for this id.
+  function computeOneInner(Input calldata e) external view returns (LensOut memory o) {
+    // Reverts MarketNotCreated for an unknown id — caught by computeOne, which leaves a zeroed
+    // (valid=false) row. A successful read is the canonical Market for this id.
     Market memory market = MIDNIGHT.toMarket(e.id);
 
     o.blockTimestamp = uint64(block.timestamp);
@@ -228,20 +234,16 @@ export async function readMidnightLiquidationLens(
   midnight: Address,
   pairs: readonly LensInput[]
 ): Promise<Map<string, LensOut>> {
-  return readDeploylessBatchLens(
+  // No `batch.gas`: see the note in blue-liquidation's fetcher. Populate from the wide event's
+  // `fixed_gas` / `item_gas_avg` / `item_gas_stddev` once real traffic has been observed.
+  return readDeploylessBatchLens({
     client,
-    {
+    parameters: {
       ...MidnightLiquidationLens.with(midnight),
-      functionName: 'lens',
-      args: [pairs],
-      batch: {
-        batchSize: MAX_INITCODE_SIZE,
-        exfil: 'revert',
-        compress: false,
-        gas: { default: { constant: 1_300_000, linear: 55_000, quadratic: 0 } }
-      }
+      functionName: 'computeOne',
+      args: pairs
     },
-    ({ id, borrower }) => lensKey(id, borrower),
-    (_input, out): LensOut => out
-  )
+    key: ({ id, borrower }) => lensKey(id, borrower),
+    value: (_input, out): LensOut => out
+  })
 }

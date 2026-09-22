@@ -7,6 +7,7 @@ import {
   createLogger,
   createPendingQueue,
   createRunner,
+  withLogging,
   createSigner,
   DEFAULT_MAX_DATA_BYTES,
   DEFAULT_MAX_GAS_LIMIT,
@@ -25,7 +26,7 @@ import { revertReason } from './revert.utils'
 import { runTick } from './runner/tick'
 import { createStrategy } from './strategies'
 import { checkVaults } from './vault-checks'
-import { fetchVaultV2Data } from './vault-data'
+import { fetchVaults } from './vault-data'
 
 // Blocks a vault stays in the queue's backpressure set AFTER its tx settles, suppressing an
 // immediate re-plan from a read RPC that lags the send RPC's confirmation.
@@ -54,12 +55,17 @@ async function main() {
     config.vaultWhitelist,
     {
       assertDeployed: vault => assertContractDeployed(client, vault, 'VAULT_WHITELIST entry'),
-      fetchVault: vault =>
-        fetchVaultV2Data(client, vault, {
+      fetchVault: async vault => {
+        const rows = await fetchVaults(client, [vault], {
           chainId: config.chainId,
           blockNumber: startupBlock,
           eoa
         })
+        const result = rows.get(vault.toLowerCase())
+        if (!result) throw new Error(`lens returned no row for ${vault}`)
+        if (result.error) throw result.error
+        return result.data
+      }
     },
     logger
   )
@@ -135,8 +141,14 @@ async function main() {
       vaults: config.vaultWhitelist,
       chainHead,
       expectedAdapter: vault => adapterByVault[vault]?.[0],
-      fetchVault: (vault, blockNumber) =>
-        fetchVaultV2Data(client, vault, { chainId: config.chainId, blockNumber, eoa }),
+      fetchVaults: (vaults, blockNumber) =>
+        withLogging(
+          () => fetchVaults(client, vaults, { chainId: config.chainId, blockNumber, eoa }),
+          {
+            logger: logger.layer,
+            lens: 'vault-v2-reallocation'
+          }
+        ),
       strategy,
       encodeReallocation: (vaultData, reallocation) =>
         encodeReallocation(vaultData.adapterAddress, reallocation),
