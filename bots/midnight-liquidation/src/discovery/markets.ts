@@ -219,6 +219,69 @@ type UnionListedMarketFilter = {
  *
  * `now` is injectable for tests.
  */
+/**
+ * A whitelist from explicitly configured market ids, with no HTTP dependency.
+ *
+ * Added for Robinhood Chain. The API-backed filter keys on Morpho's `listed=true` flag, which is
+ * their app's trust layer and entirely their decision — no market on 4663 carries it, so a
+ * deployment there would idle at `markets: 0` forever while behaving exactly like a healthy
+ * fail-closed bot. Waiting to be listed is not a dependency worth taking for markets we created and
+ * underwrite ourselves.
+ *
+ * Deliberately NOT a second endpoint we host. An endpoint would reintroduce the same failure mode one
+ * level down — a service that can go stale, empty, or be wrong — to express a set that changes only
+ * when we create a market. Config is the honest shape for that, and it is auditable in the
+ * deployment's env rather than in a response body.
+ *
+ * `updatedAt` reports the CURRENT time on every call, not the process start.
+ *
+ * The first version stamped it once at construction and claimed in this comment that it was "fresh
+ * forever by construction". It was the opposite: the union ages a source by `now() - updatedAt`,
+ * which grows without bound, so this source expired exactly `maxAgeMs` (10 minutes) after boot and
+ * the whitelist silently collapsed to zero markets — the precise failure this filter exists to
+ * prevent, and invisible because a fail-closed empty whitelist looks identical to a healthy one.
+ * Caught in production logs (`markets.source_expired expired=["static:MARKET_IDS"]`), not by a type.
+ *
+ * Always-current is correct HERE and would be wrong for a fetched source: staleness measures how
+ * long since we last heard from an upstream that might have changed its mind, and this source has
+ * no upstream. The operator edits env and redeploys, which is the same act as changing any config.
+ *
+ * Fail-closed is preserved: an unset or empty variable yields an empty set, which lists nothing.
+ * Invalid entries are dropped loudly rather than silently widening or narrowing the set.
+ */
+export function createStaticListedMarketFilter(deps: {
+  marketIds: readonly string[]
+  chainId: number
+  logger: Logger
+}): ListedMarketFilter {
+  const valid = new Set<string>()
+  const rejected: string[] = []
+  for (const raw of deps.marketIds) {
+    const id = raw.trim().toLowerCase()
+    if (id.length === 0) continue
+    if (isHex(id) && id.length === 66) valid.add(id)
+    else rejected.push(raw)
+  }
+  if (rejected.length > 0) {
+    // Loud, because a typo'd id silently narrows the whitelist and the symptom is a liquidation that
+    // never happens — the hardest possible failure to notice.
+    deps.logger.error('markets.static_invalid', {
+      chainId: deps.chainId,
+      rejected,
+      detail: 'ignored MARKET_IDS entries that are not 32-byte hex market ids'
+    })
+  }
+  deps.logger.info('markets.static_loaded', { chainId: deps.chainId, markets: valid.size })
+  return {
+    isListed: marketId => valid.has(marketId.toLowerCase()),
+    ids: () => valid,
+    refresh: async () => {},
+    // Evaluated per call, so the union's `now() - updatedAt` is always ~0 and this source can never
+    // age out. See the note above: a fixed timestamp expired the whitelist ten minutes after boot.
+    snapshot: () => ({ source: 'static:MARKET_IDS', markets: valid.size, updatedAt: Date.now() })
+  }
+}
+
 export function createUnionListedMarketFilter(deps: {
   filters: ListedMarketFilter[]
   chainId: number

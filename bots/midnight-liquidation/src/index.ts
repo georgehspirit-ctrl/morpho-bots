@@ -40,7 +40,11 @@ import {
   discoverBorrowers,
   MAX_DISCOVERY_PAGES
 } from './discovery/borrowers'
-import { createListedMarketFilter, createUnionListedMarketFilter } from './discovery/markets'
+import {
+  createListedMarketFilter,
+  createStaticListedMarketFilter,
+  createUnionListedMarketFilter
+} from './discovery/markets'
 import { createTokenPriceSource } from './discovery/token-prices'
 import { encodeLiquidationExec } from './execution/encode-call'
 import { composeQuoting } from './quotes'
@@ -143,9 +147,24 @@ async function main() {
   // startup (non-fatal — a failed first fetch leaves the set empty = fail-closed, and the timer below
   // retries), then poll on an interval.
   const listedMarkets = createUnionListedMarketFilter({
-    filters: config.markets.apiUrls.map(apiUrl =>
-      createListedMarketFilter({ apiUrl, chainId: config.chainId, logger })
-    ),
+    filters: [
+      ...config.markets.apiUrls.map(apiUrl =>
+        createListedMarketFilter({ apiUrl, chainId: config.chainId, logger })
+      ),
+      // Markets we created and underwrite ourselves, asserted in env rather than waiting on Morpho's
+      // `listed` flag. Unioned, so it widens the whitelist and never narrows what an endpoint lists.
+      // Omitted entirely when unset, because the union rejects an empty filter list and a source that
+      // lists nothing would otherwise look identical to one that is merely cold.
+      ...(config.markets.staticMarketIds.length > 0
+        ? [
+            createStaticListedMarketFilter({
+              marketIds: config.markets.staticMarketIds,
+              chainId: config.chainId,
+              logger
+            })
+          ]
+        : [])
+    ],
     chainId: config.chainId,
     maxAgeMs: LISTED_MARKETS_MAX_AGE_MS,
     logger

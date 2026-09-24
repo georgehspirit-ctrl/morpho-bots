@@ -4,7 +4,7 @@ import type { Address, Hex } from 'viem'
 // imports, so an encoder can `import type { Swap }` from here without creating a runtime cycle.
 
 /** A swap venue the operator can route a collateral through. */
-export type Venue = 'uniswap-v3' | '0x' | '1inch' | 'lifi' | 'liquidswap'
+export type Venue = 'uniswap-v3' | '0x' | '1inch' | 'lifi' | 'liquidswap' | 'rialto'
 
 /**
  * `tokenIn` (collateral) decimals — needed ONLY by decimal-denominated venues (LiquidSwap, whose API

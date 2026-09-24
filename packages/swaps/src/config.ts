@@ -41,6 +41,10 @@ const lifiVenue = z
 const liquidSwapVenue = z
   .object({ venue: z.literal('liquidswap'), baseUrl: z.string().url().optional(), slippageBps })
   .strict()
+// Rialto propAMM — keyed like 0x/1inch; the key itself is injected by the HTTP client, never here.
+const rialtoVenue = z
+  .object({ venue: z.literal('rialto'), baseUrl: z.string().url().optional(), slippageBps })
+  .strict()
 
 // A pre-venue entry ({ router, fee, slippageBps }, no `venue`) defaults to uniswap-v3, so existing
 // configs keep parsing byte-identically.

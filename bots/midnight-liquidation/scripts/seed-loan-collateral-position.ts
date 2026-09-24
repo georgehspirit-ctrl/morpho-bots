@@ -59,11 +59,27 @@ import { encodeRatifierData, hashOffer, isLeaf, signOfferTree, toId } from './se
 import { priceToTick, tickToPrice } from './seed/price-tick'
 import { confirmPrompt, RETRY_DELAY_MS, SIMULATE_RETRIES, txStep } from './seed/tx'
 
-const CHAIN_ID = 8453
-const MIDNIGHT = getAddress('0xAdedD8ab6dE832766Fedf0FaC4992E5C4D3EA18A')
-/** `EcrecoverRatifier` on Base — ratifies an offer against a maker's own ECDSA signature. */
-const ECRECOVER_RATIFIER = getAddress('0xd6e70365C8E8DDa9a4ca662C07bbE663b017755E')
-const USDC = getAddress('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')
+// Chain constants, overridable from env so the same script seeds any chain Midnight is deployed on.
+// The offer-tree hashing, the `toId` port and the tx retry handling below are all chain-agnostic
+// already; only these four addresses were pinned to Base. Defaults keep Base behaviour identical for
+// an existing caller that sets none of them.
+//
+// Robinhood Chain (4663):
+//   SEED_MIDNIGHT=0x6120765Ba5336150BbdDdD0Cd9108B5bFD369632
+//   SEED_RATIFIER=0x90B800999e4ACd1bD20283BD450bBd2e06D91F7C
+//   SEED_LOAN_TOKEN=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168   (USDG, also 6dp)
+const CHAIN_ID = Number(process.env.SEED_CHAIN_ID ?? 8453)
+const MIDNIGHT = getAddress(
+  process.env.SEED_MIDNIGHT ?? '0xAdedD8ab6dE832766Fedf0FaC4992E5C4D3EA18A'
+)
+/** `EcrecoverRatifier` — ratifies an offer against a maker's own ECDSA signature. Per chain. */
+const ECRECOVER_RATIFIER = getAddress(
+  process.env.SEED_RATIFIER ?? '0xd6e70365C8E8DDa9a4ca662C07bbE663b017755E'
+)
+/** The market's loan token. Named USDC for Base; USDG on Robinhood Chain, both 6 decimals. */
+const USDC = getAddress(
+  process.env.SEED_LOAN_TOKEN ?? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+)
 const PRIVATE_KEY_HEX_LENGTH = 66
 const USDC_DECIMALS = 6
 
@@ -467,7 +483,7 @@ async function main() {
     logger.info('seed.dry_run_complete', { market: args.market })
     return
   }
-  if (!args.yes && !(await confirmPrompt('Proceed to send REAL transactions on Base mainnet?'))) {
+  if (!args.yes && !(await confirmPrompt(`Proceed to send REAL transactions on chain ${CHAIN_ID}?`))) {
     logger.warn('seed.declined', {})
     return
   }
