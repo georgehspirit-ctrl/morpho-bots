@@ -165,6 +165,22 @@ envFrom: []
 #   - secretRef:
 #       name: quoter-bot-signer
 
+# Deliver the runtime environment Secret from AWS Secrets Manager through External Secrets
+# Operator (external-secrets.io/v1) instead of a hand-applied Secret. Requires
+# serviceAccount.create: true with an IRSA/Pod Identity annotation: the SecretStore
+# authenticates as that ServiceAccount (auth.jwt.serviceAccountRef), so the bot's own IAM role
+# needs secretsmanager:GetSecretValue/DescribeSecret on `remoteKey` and kms:Decrypt on its key.
+# The remote value is a flat JSON object of environment variables; every key becomes a Secret
+# key of <fullname>-runtime, which the chart appends to envFrom. The StatefulSet is annotated
+# `secret.reloader.stakater.com/reload: <fullname>-runtime`, so with Stakater Reloader installed a
+# rotated value restarts the pod (environment variables are captured at container start).
+externalSecret:
+  enabled: false
+  # Secrets Manager secret name or ARN, e.g. quoter-bot/prd/1/runtime.
+  remoteKey: ''
+  region: ''
+  refreshInterval: 5m
+
 # Durable ownership state (bot-issued offer-group IDs) lives under this mount; the chart
 # always sets XDG_STATE_HOME to `mountPath`. Losing it makes previously bot-issued groups
 # unknown, which fails readiness until an operator invalidates or adopts them — keep

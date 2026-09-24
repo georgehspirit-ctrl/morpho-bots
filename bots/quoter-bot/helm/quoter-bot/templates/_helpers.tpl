@@ -133,3 +133,13 @@ keeping the pin unique even when long release names share their truncated prefix
 {{- define "quoter-bot.configYaml" -}}
 {{- toYaml .Values.config }}
 {{- end }}
+
+{{/* Name of the ExternalSecret-owned runtime environment Secret. */}}
+{{- define "quoter-bot.runtimeSecretName" -}}
+{{- $fullname := include "quoter-bot.fullname" . }}
+{{- if gt (len $fullname) 55 }}
+{{- printf "%s-%s-runtime" ($fullname | trunc 46 | trimSuffix "-") (sha256sum $fullname | trunc 8) }}
+{{- else }}
+{{- printf "%s-runtime" $fullname }}
+{{- end }}
+{{- end }}

@@ -171,6 +171,39 @@ files over `--set` for the `config` block for the same reason.
 - To keep the whole file out of Helm release storage, pre-create a Secret with the complete
   configuration under the key `quoter-bot.yaml` and set `existingConfigSecret`.
 
+## Runtime Secret from AWS Secrets Manager
+
+`externalSecret.enabled` replaces the hand-applied runtime Secret with an
+[External Secrets Operator](https://external-secrets.io) sync: the chart renders a namespaced
+`SecretStore` (AWS Secrets Manager, authenticating as the chart-managed ServiceAccount through
+`auth.jwt.serviceAccountRef`) and an `ExternalSecret` `<fullname>-runtime` that `dataFrom`
+extracts a flat JSON object of environment variables from `externalSecret.remoteKey` (a secret
+name or ARN, e.g. `quoter-bot/prd/1/runtime`). The rendered Secret is appended to `envFrom`
+after any `envFrom` entries, so its keys override `config` like any other environment variable.
+
+Prerequisites:
+
+- External Secrets Operator installed in the cluster (`external-secrets.io/v1` CRDs).
+- `serviceAccount.create: true` with an IRSA or EKS Pod Identity annotation; that IAM role
+  needs `secretsmanager:GetSecretValue`/`DescribeSecret` on `remoteKey` and `kms:Decrypt` on
+  the secret's key — no other Secrets Manager or KMS access.
+- Optional [Stakater Reloader](https://github.com/stakater/Reloader): the StatefulSet is
+  annotated `secret.reloader.stakater.com/reload: <fullname>-runtime`, so a rotated value
+  restarts the pod automatically (environment variables are captured at container start).
+  Without Reloader, a rotation still syncs into the Secret on `refreshInterval` but the pod
+  needs a manual `kubectl rollout restart`.
+
+```yaml
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/tools-quoter-bot-<env>-<chain>
+externalSecret:
+  enabled: true
+  remoteKey: quoter-bot/prd/1/runtime
+  region: eu-west-3
+```
+
 ## Parameters
 
 ### Image and workload
@@ -202,6 +235,7 @@ files over `--set` for the `config` block for the same reason.
 | `existingConfigSecret` | `''`    | Pre-created Secret with the full file under key `quoter-bot.yaml`; replaces the rendered Secret.                                    |
 | `env`                  | `[]`    | Extra `EnvVar` objects; environment overrides YAML (signer secret, `BETTERSTACK_*`). `XDG_STATE_HOME` is reserved and filtered out. |
 | `envFrom`              | `[]`    | Extra `EnvFromSource` objects for whole Secrets/ConfigMaps of overrides.                                                            |
+| `externalSecret`       | off     | Fetch the runtime environment Secret from AWS Secrets Manager via External Secrets Operator — see below. Requires `serviceAccount.create: true` with an IRSA/Pod Identity annotation; the Secret becomes `<fullname>-runtime` and is appended to `envFrom`. |
 
 ### Persistence and security
 

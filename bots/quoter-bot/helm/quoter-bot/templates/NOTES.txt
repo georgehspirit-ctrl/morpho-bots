@@ -12,6 +12,12 @@ WARNING: no `config` mapping and no `existingConfigSecret` were provided. The bo
 environment-only mode and fails loudly unless `env`/`envFrom` supply every required variable.
 {{- end }}
 
+{{- if .Values.externalSecret.enabled }}
+Runtime environment: ExternalSecret {{ include "quoter-bot.runtimeSecretName" . }} syncs
+{{ .Values.externalSecret.remoteKey }} from AWS Secrets Manager every
+{{ .Values.externalSecret.refreshInterval }}; Stakater Reloader restarts the pod on rotation.
+{{- end }}
+
 {{- if not .Values.persistence.enabled }}
 
 WARNING: persistence is disabled. Durable offer-group ownership state is lost on every
