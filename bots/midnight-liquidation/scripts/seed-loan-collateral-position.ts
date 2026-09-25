@@ -34,6 +34,7 @@ import { parseArgs } from 'node:util'
 import {
   createPublicClient,
   createWalletClient,
+  defineChain,
   erc20Abi,
   formatUnits,
   getAddress,
@@ -69,6 +70,25 @@ import { confirmPrompt, RETRY_DELAY_MS, SIMULATE_RETRIES, txStep } from './seed/
 //   SEED_RATIFIER=0x90B800999e4ACd1bD20283BD450bBd2e06D91F7C
 //   SEED_LOAN_TOKEN=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168   (USDG, also 6dp)
 const CHAIN_ID = Number(process.env.SEED_CHAIN_ID ?? 8453)
+/**
+ * The viem chain object behind every client and signer here.
+ *
+ * This has to track CHAIN_ID. viem stamps `chain.id` into the EIP-1559 signature, so leaving it
+ * pinned to `base` while CHAIN_ID said 4663 produced a correctly-built Robinhood transaction signed
+ * for Base, which the node rejected outright:
+ *   invalid chain id for signer: have 8453 want 4663
+ * Nothing else on the object is load-bearing in this script — the contract addresses all come from
+ * the SEED_* env above and the transport URL from RPC_URL — so a minimal definition is enough.
+ */
+const SEED_CHAIN =
+  CHAIN_ID === base.id
+    ? base
+    : defineChain({
+        id: CHAIN_ID,
+        name: `chain-${CHAIN_ID}`,
+        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+        rpcUrls: { default: { http: [process.env.RPC_URL ?? ''] } }
+      })
 const MIDNIGHT = getAddress(
   process.env.SEED_MIDNIGHT ?? '0xAdedD8ab6dE832766Fedf0FaC4992E5C4D3EA18A'
 )
@@ -216,7 +236,9 @@ async function main() {
   const rpcUrl = reqEnv('RPC_URL')
   const chainIdEnv = process.env.CHAIN_ID?.trim()
   if (chainIdEnv && chainIdEnv !== String(CHAIN_ID)) {
-    throw new Error(`only Base (${CHAIN_ID}) is supported`)
+    throw new Error(
+      `CHAIN_ID=${chainIdEnv} disagrees with SEED_CHAIN_ID=${CHAIN_ID}; set them the same or neither`
+    )
   }
   const keyLender = reqKey('PRIVATE_KEY_LENDER')
   const keyBorrower = reqKey('PRIVATE_KEY_BORROWER')
@@ -224,11 +246,11 @@ async function main() {
   // viem's concrete client generics are invariant against the broad `PublicClient`/`WalletClient`
   // aliases the helpers accept, so cast once at the creation site.
   const publicClient = createPublicClient({
-    chain: base,
+    chain: SEED_CHAIN,
     transport: http(rpcUrl)
   }) as unknown as PublicClient
   const deploylessClient = createDeploylessClient({
-    chain: base,
+    chain: SEED_CHAIN,
     rpcUrl,
     rpcUrlFallback: undefined
   })
@@ -243,12 +265,12 @@ async function main() {
   }
   const walletLender = createWalletClient({
     account: lender,
-    chain: base,
+    chain: SEED_CHAIN,
     transport: http(rpcUrl)
   }) as unknown as WalletClient
   const walletBorrower = createWalletClient({
     account: borrower,
-    chain: base,
+    chain: SEED_CHAIN,
     transport: http(rpcUrl)
   }) as unknown as WalletClient
   const ctx = { publicClient, logger }
