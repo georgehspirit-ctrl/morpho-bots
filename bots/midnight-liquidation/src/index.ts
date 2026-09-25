@@ -38,6 +38,7 @@ import { LISTED_MARKETS_MAX_AGE_MS, TOKEN_PRICES_REFRESH_MS } from './constants'
 import {
   createApiCandidateSource,
   discoverBorrowers,
+  parseStaticCandidates,
   MAX_DISCOVERY_PAGES
 } from './discovery/borrowers'
 import {
@@ -281,8 +282,29 @@ async function main() {
   // a longer refresh interval (or a wedged refresh loop) would otherwise leave a total liquidation halt
   // unreported for most of each interval — visible only as `discover.filtered` reading `listed: 0`,
   // which is indistinguishable from "nothing to do".
+  // Parsed once at startup: the value is static for the process lifetime, and a per-tick reparse
+  // would re-log every rejected entry on every block.
+  const staticCandidates = parseStaticCandidates(process.env.EXTRA_CANDIDATES, { logger })
+  if (staticCandidates.length > 0) {
+    logger.info('discover.static_source', {
+      pairs: staticCandidates.length,
+      detail:
+        'operator-supplied (market, borrower) pairs unioned into every pass — a coverage floor for markets Morpho does not index, NOT discovery of arbitrary borrowers'
+    })
+  }
+
   const discover = async () => {
-    const candidates = await discoverBorrowers(fetchPage, { logger, maxPages: MAX_DISCOVERY_PAGES })
+    const discovered = await discoverBorrowers(fetchPage, { logger, maxPages: MAX_DISCOVERY_PAGES })
+    // Union, de-duplicated: the static pairs are additive coverage, so a pair the API also returns
+    // must not be evaluated twice in one pass.
+    const candidates = [...discovered]
+    const seenPairs = new Set(discovered.map(c => `${c.marketId}:${c.borrower}`))
+    for (const candidate of staticCandidates) {
+      const key = `${candidate.marketId}:${candidate.borrower}`
+      if (seenPairs.has(key)) continue
+      seenPairs.add(key)
+      candidates.push(candidate)
+    }
     const whitelist = listedMarkets.current()
     if (whitelist.fresh === 0) {
       logger.warn('markets.whitelist_expired', {
