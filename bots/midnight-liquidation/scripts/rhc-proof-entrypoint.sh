@@ -29,6 +29,7 @@ node dist/scripts/seed-loan-collateral-position.js \
   --market "$MARKET_ID" \
   --markets-api "${MARKETS_API_URL:-https://api.morpho.org/v0/midnight/markets}" \
   --face-usdc "${PROOF_FACE_USDG:-28}" \
+  --max-spend-usdc "${PROOF_MAX_SPEND_USDG:-60}" \
   --yes
 
 echo "SEEDED_MARKET_ID=$MARKET_ID"
