@@ -260,15 +260,28 @@ async function main() {
     dryRun: args.dryRun
   })
 
+  // The guard's intent is "would the target bot actually act on this market" — keep that, but ask
+  // the same question the bot asks. A deployment can whitelist markets from MARKET_IDS as well as
+  // from the endpoint, and on a chain where Morpho lists nothing (every market on 4663 is
+  // listed=false) the endpoint alone would refuse a market the bot is in fact configured to
+  // liquidate. Union the two, exactly as index.ts does.
+  const staticIds = (process.env.MARKET_IDS ?? '')
+    .split(',')
+    .map(part => part.trim().toLowerCase())
+    .filter(part => part.length > 0)
   const whitelist = createListedMarketFilter({
     apiUrl: args.marketsApi,
     chainId: CHAIN_ID,
     logger
   })
   await whitelist.refresh()
-  if (!whitelist.isListed(args.market)) {
+  const listedByEnv = staticIds.includes(args.market.toLowerCase())
+  if (listedByEnv) {
+    logger.info('seed.whitelisted_by_env', { market: args.market, detail: 'present in MARKET_IDS' })
+  }
+  if (!listedByEnv && !whitelist.isListed(args.market)) {
     throw new Error(
-      `market ${args.market} is not listed for chain ${CHAIN_ID} on ${whitelist.snapshot().source} — the bot would never act on it`
+      `market ${args.market} is in neither MARKET_IDS nor the listed set for chain ${CHAIN_ID} on ${whitelist.snapshot().source} — the bot would never act on it`
     )
   }
 
