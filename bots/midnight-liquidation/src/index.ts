@@ -30,6 +30,7 @@ import { delay, ensureError, tryCatch } from '@repo/utils'
 import { erc20Abi } from 'viem'
 import { getBlockNumber, readContract } from 'viem/actions'
 
+import type { BorrowerCandidate } from './discovery/borrowers'
 import type { Market } from './execution/encode-call'
 import type { LiquidationPlan } from './sizing/plan'
 
@@ -41,6 +42,7 @@ import {
   parseStaticCandidates,
   MAX_DISCOVERY_PAGES
 } from './discovery/borrowers'
+import { createOnchainCandidateSource } from './discovery/onchain-borrowers'
 import {
   createListedMarketFilter,
   createStaticListedMarketFilter,
@@ -285,6 +287,23 @@ async function main() {
   // Parsed once at startup: the value is static for the process lifetime, and a per-tick reparse
   // would re-log every rejected entry on every block.
   const staticCandidates = parseStaticCandidates(process.env.EXTRA_CANDIDATES, { logger })
+  // On-chain discovery, where the indexer does not cover the chain. This is a real source, not a
+  // hand-maintained list: it finds borrowers nobody wrote down.
+  const onchainCandidates =
+    config.discovery.onchainFromBlock === null
+      ? null
+      : createOnchainCandidateSource({
+          client,
+          midnight: config.midnight,
+          fromBlock: config.discovery.onchainFromBlock,
+          logger
+        })
+  if (onchainCandidates) {
+    logger.info('discovery.onchain_enabled', {
+      fromBlock: config.discovery.onchainFromBlock?.toString(),
+      detail: 'scanning Midnight events for (market, borrower) pairs'
+    })
+  }
   if (staticCandidates.length > 0) {
     logger.info('discover.static_source', {
       pairs: staticCandidates.length,
@@ -295,11 +314,23 @@ async function main() {
 
   const discover = async () => {
     const discovered = await discoverBorrowers(fetchPage, { logger, maxPages: MAX_DISCOVERY_PAGES })
+    // The on-chain scan must never take the tick down: a failed pass leaves its cursor unmoved and
+    // re-covers the same blocks next tick, so degrading to the other sources for one tick is safe,
+    // whereas throwing here would stop liquidating everything.
+    let onchain: BorrowerCandidate[] = []
+    if (onchainCandidates) {
+      const scanned = await tryCatch(onchainCandidates())
+      if (scanned.error) {
+        logger.warn('discover.onchain_error', { error: String(scanned.error) })
+      } else {
+        onchain = scanned.data
+      }
+    }
     // Union, de-duplicated: the static pairs are additive coverage, so a pair the API also returns
     // must not be evaluated twice in one pass.
     const candidates = [...discovered]
     const seenPairs = new Set(discovered.map(c => `${c.marketId}:${c.borrower}`))
-    for (const candidate of staticCandidates) {
+    for (const candidate of [...onchain, ...staticCandidates]) {
       const key = `${candidate.marketId}:${candidate.borrower}`
       if (seenPairs.has(key)) continue
       seenPairs.add(key)

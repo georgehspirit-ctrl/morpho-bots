@@ -129,6 +129,13 @@ type ChainDefaults = {
    * so 100_000 reads as $0.10. Re-derive it before pointing this bot at an 18-decimal loan token.
    */
   minSurplusUnits: bigint
+  /**
+   * `DISCOVERY_FROM_BLOCK` — first block of the on-chain borrower scan; `null` runs API-only.
+   *
+   * Non-null only where Morpho does not index the chain. There the candidates endpoint returns nothing
+   * and API-only discovery finds no pairs at all, while every health signal still reads green.
+   */
+  onchainFromBlock: bigint | null
   /** `BACKOFF_BASE_BLOCKS` — first step of the per-position failure backoff. */
   backoffBaseBlocks: bigint
   /** `BACKOFF_MAX_BLOCKS` — ceiling of the per-position failure backoff. */
@@ -180,7 +187,10 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       seizeCapMarginBps: 30,
       // 0 preserves upstream behaviour on Base, where this gate did not exist and gas economics were
       // never measured for it. Set it deliberately per chain rather than inheriting a guess.
-      minSurplusUnits: 0n
+      minSurplusUnits: 0n,
+      // Morpho indexes Base, so the candidates endpoint is authoritative there and a redundant log
+      // scan would only add RPC load.
+      onchainFromBlock: null
     })
   },
   [mainnet.id]: {
@@ -203,7 +213,8 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       // One-block oracle-drift headroom, and a mainnet block is ~6x the drift window of a Base one.
       seizeCapMarginBps: 60,
       // Unmeasured here too; mainnet gas would demand a far larger floor than either L2.
-      minSurplusUnits: 0n
+      minSurplusUnits: 0n,
+      onchainFromBlock: null
     })
   },
   [robinhood.id]: {
@@ -228,7 +239,10 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       // floor has to sit between them. It also must stay well under the achievable bonus — a
       // loan-as-collateral slot at 98% LLTV caps maxLif at ~1.006, so a 28-unit position can only ever
       // yield ~0.168 — which is why this is $0.10 and not a rounder, larger number.
-      minSurplusUnits: 100_000n
+      minSurplusUnits: 100_000n,
+      // Morpho indexes nothing on 4663, so this is the ONLY real borrower source on this chain.
+      // A full scan from genesis: the whole Midnight history here is three Take events.
+      onchainFromBlock: 0n
     })
   }
 }
@@ -365,6 +379,15 @@ export type DiscoveryConfig = {
    * soon-to-be-liquidatable positions from the HF-triggered set.
    */
   healthFactorLte: number
+  /**
+   * First block of the on-chain borrower scan, or `null` to run API-only discovery.
+   *
+   * Set wherever Morpho does not index the chain: there the candidates endpoint returns nothing, and
+   * API-only discovery yields no pairs at all while every health signal still reads green. `0n` is a
+   * complete scan and is what Robinhood Chain uses — its entire Midnight history is a handful of
+   * events, so there is nothing to gain by starting later and a later start can only lose borrowers.
+   */
+  onchainFromBlock: bigint | null
 }
 
 /**
@@ -820,7 +843,11 @@ export function loadConfig(
   }
   const discovery: DiscoveryConfig = {
     apiUrl,
-    healthFactorLte: numberEnv(env, 'HEALTH_FACTOR_LTE', DEFAULT_HEALTH_FACTOR_LTE, { min: 1 })
+    healthFactorLte: numberEnv(env, 'HEALTH_FACTOR_LTE', DEFAULT_HEALTH_FACTOR_LTE, { min: 1 }),
+    onchainFromBlock:
+      env.DISCOVERY_FROM_BLOCK?.trim() === undefined || env.DISCOVERY_FROM_BLOCK?.trim() === ''
+        ? defaults.onchainFromBlock
+        : bigintEnv(env, 'DISCOVERY_FROM_BLOCK', defaults.onchainFromBlock ?? 0n, { min: 0n })
   }
 
   return {
