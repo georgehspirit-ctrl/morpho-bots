@@ -32,4 +32,4 @@ RUN pnpm -r --if-present run build
 WORKDIR /repo/bots/midnight-liquidation
 # Sizing suite only: the fork suite requires RPC_URL_8453 and an anvil fork, and fails loud without
 # them by design. Holds after the run so the result stays readable instead of restart-looping.
-CMD ["sh", "-c", "pnpm exec vitest run test/sizing --reporter=basic; echo \"VITEST_EXIT=$?\"; sleep 3600"]
+CMD ["sh", "-c", "pnpm exec vitest run test/sizing; echo \"VITEST_EXIT=$?\"; sleep 3600"]
