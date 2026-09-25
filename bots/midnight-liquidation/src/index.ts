@@ -397,6 +397,7 @@ async function main() {
       chainHead,
       caller: config.executooorAddress,
       seizeCapMarginBps: config.quoting.seizeCapMarginBps,
+      minSurplusUnits: config.quoting.minSurplusUnits,
       minSurplusBps: config.quoting.minSurplusBps,
       headroomFloorBps: config.quoting.headroomFloorBps,
       // Scoped to the lens read: viem-dlc emits per outermost request inside the scope, so a

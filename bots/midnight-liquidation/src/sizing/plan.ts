@@ -145,6 +145,7 @@ export type PlanSkipReason =
   | 'nothing_to_seize'
   | 'seize_rounds_to_zero'
   | 'insufficient_headroom'
+  | 'below_dust_floor'
   | 'writeoff_below_max_debt'
 
 /**
@@ -203,6 +204,24 @@ type PlanOptions = {
    * applies to a swap-free plan, which has no route to pay for — see {@link gateOnHeadroom}.
    */
   headroomFloorBps?: number
+  /**
+   * Absolute floor on {@link planSurplus}, in loan-token units — BOTS-81.
+   *
+   * {@link headroomBps} is a RATE, so it is scale-invariant by construction and therefore blind to
+   * size: a 0.000001-unit surplus and a 100-unit surplus at the same LIF report identical headroom.
+   * Nothing else rejects dust either, because post-maturity `lif > WAD` makes `planSurplus`
+   * structurally positive for every candidate. Observed live on 4663: after a cap-bound liquidation
+   * left 0.3% of the debt outstanding (`seizeCapMarginBps`), the bot re-planned the residue every
+   * block and broadcast a second liquidation earning 0.000449 USDG against ~200k gas — then kept
+   * planning at `surplus=1` (0.000001 USDG). Each pass repays 99.7% of what remains, so the debt
+   * decays geometrically and NEVER reaches zero; without an absolute floor the position is an
+   * unbounded, gas-negative loop.
+   *
+   * Applies to swap-free plans too. The {@link gateOnHeadroom} exemption is specifically about ROUTE
+   * cost, which a swap-free plan does not pay; gas it very much does, and gas is what this bounds.
+   * `0` disables the gate.
+   */
+  minSurplusUnits?: bigint
 }
 
 const skip = (reason: PlanSkipReason, headroom?: SkippedHeadroom): PlanOutcome => ({
@@ -525,7 +544,7 @@ export const planCandidates = (
   input: PlanInput,
   options: PlanOptions = {}
 ): { plans: LiquidationPlan[]; skips: PlanSkip[] } => {
-  const { seizeCapMarginBps = 0, headroomFloorBps = 0 } = options
+  const { seizeCapMarginBps = 0, headroomFloorBps = 0, minSurplusUnits = 0n } = options
   // The position-level guards below reject before any slot is examined, so they carry the inert
   // stand-in index rather than a real one.
   const none = (reason: PlanSkipReason) => ({
@@ -574,7 +593,7 @@ export const planCandidates = (
       continue
     }
     for (const mode of openModePlans(input, slot, seizeCapMarginBps)) {
-      const outcome = gateOnHeadroom(mode, headroomFloorBps)
+      const outcome = gateOnDustFloor(gateOnHeadroom(mode, headroomFloorBps), minSurplusUnits)
       if (outcome.plan === null) {
         skips.push({
           reason: outcome.reason,
@@ -643,6 +662,24 @@ const gateOnHeadroom = (outcome: PlanOutcome, headroomFloorBps: number): PlanOut
   if (bps >= BigInt(headroomFloorBps)) return outcome
   return skip('insufficient_headroom', {
     bps,
+    lif: outcome.plan.lif,
+    postMaturityMode: outcome.plan.postMaturityMode
+  })
+}
+
+/**
+ * Rejects a sized plan whose absolute surplus cannot cover the gas to collect it — BOTS-81.
+ *
+ * Deliberately NOT exempt for swap-free plans: see {@link PlanOptions.minSurplusUnits}. Bad-debt
+ * write-offs never reach here — {@link planCandidates} returns them before the gates — so a write-off
+ * cannot be suppressed by a dust floor.
+ */
+const gateOnDustFloor = (outcome: PlanOutcome, minSurplusUnits: bigint): PlanOutcome => {
+  if (minSurplusUnits <= 0n || outcome.plan === null) return outcome
+  const surplus = planSurplus(outcome.plan)
+  if (surplus >= minSurplusUnits) return outcome
+  return skip('below_dust_floor', {
+    bps: headroomBps(outcome.plan),
     lif: outcome.plan.lif,
     postMaturityMode: outcome.plan.postMaturityMode
   })

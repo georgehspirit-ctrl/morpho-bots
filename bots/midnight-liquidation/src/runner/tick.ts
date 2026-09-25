@@ -231,6 +231,7 @@ const sizeCandidates = (deps: {
   lensOut: Map<string, LensOut>
   inflight: ReadonlySet<string>
   seizeCapMarginBps: number
+  minSurplusUnits: bigint
   headroomFloorBps: number
   usdValueOf: (loanToken: Address, loanUnits: bigint) => bigint | null
   counters: TickCounters
@@ -241,6 +242,7 @@ const sizeCandidates = (deps: {
     lensOut,
     inflight,
     seizeCapMarginBps,
+    minSurplusUnits,
     headroomFloorBps,
     usdValueOf,
     counters,
@@ -261,7 +263,11 @@ const sizeCandidates = (deps: {
     }
 
     const input = planInputFromLens(out)
-    const { plans, skips } = planCandidates(input, { seizeCapMarginBps, headroomFloorBps })
+    const { plans, skips } = planCandidates(input, {
+      seizeCapMarginBps,
+      headroomFloorBps,
+      minSurplusUnits
+    })
 
     // Per-CANDIDATE reasons: with several activated collaterals — or one matured-and-unhealthy slot
     // in both open modes — some candidates can skip while others size, so these are reported even when
@@ -581,6 +587,8 @@ export async function runTick(deps: {
   caller: Address
   /** Headroom (bps) shaved off a cap-binding seize for one-block oracle-drift; passed to sizing. */
   seizeCapMarginBps: number
+  /** Absolute surplus floor in loan units; the only gate that can reject dust. Passed to sizing. */
+  minSurplusUnits: bigint
   /**
    * Surplus over break-even a quoted route must clear to be simulated, in bps of the plan's
    * contract-derived repay. `0` is pure break-even — both sides then come from the contract's own
@@ -652,6 +660,7 @@ export async function runTick(deps: {
     chainHead,
     caller,
     seizeCapMarginBps,
+    minSurplusUnits,
     headroomFloorBps,
     minSurplusBps,
     readLens,
@@ -714,6 +723,7 @@ export async function runTick(deps: {
     lensOut,
     inflight: inflightLabels(),
     seizeCapMarginBps,
+    minSurplusUnits,
     headroomFloorBps,
     usdValueOf,
     counters,

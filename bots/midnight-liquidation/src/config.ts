@@ -120,6 +120,15 @@ type ChainDefaults = {
   maxGasLimit: bigint
   /** `SEIZE_CAP_MARGIN_BPS` — headroom shaved off the on-chain repay cap when sizing a seize. */
   seizeCapMarginBps: number
+  /**
+   * `MIN_SURPLUS_UNITS` — absolute floor on a plan's surplus, in LOAN-TOKEN UNITS (BOTS-81).
+   *
+   * Units, not bps, because the thing it bounds is gas — a fixed cost per liquidation, independent of
+   * position size — and every rate-based gate is scale-invariant and therefore blind to dust. The
+   * value is decimals-dependent: every loan token across these deployments is 6-decimal (USDC/USDG),
+   * so 100_000 reads as $0.10. Re-derive it before pointing this bot at an 18-decimal loan token.
+   */
+  minSurplusUnits: bigint
   /** `BACKOFF_BASE_BLOCKS` — first step of the per-position failure backoff. */
   backoffBaseBlocks: bigint
   /** `BACKOFF_MAX_BLOCKS` — ceiling of the per-position failure backoff. */
@@ -168,7 +177,10 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       // Clears the in-block p95 tip in ~91% of Base blocks; escalation only adds 1.42x on top.
       priorityFeeGwei: '0.1',
       maxGasLimit: 15_000_000n,
-      seizeCapMarginBps: 30
+      seizeCapMarginBps: 30,
+      // 0 preserves upstream behaviour on Base, where this gate did not exist and gas economics were
+      // never measured for it. Set it deliberately per chain rather than inheriting a guess.
+      minSurplusUnits: 0n
     })
   },
   [mainnet.id]: {
@@ -189,7 +201,9 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       // `maxBumpAttempts`), so it cannot be tightened to limit cost.
       maxGasLimit: 3_000_000n,
       // One-block oracle-drift headroom, and a mainnet block is ~6x the drift window of a Base one.
-      seizeCapMarginBps: 60
+      seizeCapMarginBps: 60,
+      // Unmeasured here too; mainnet gas would demand a far larger floor than either L2.
+      minSurplusUnits: 0n
     })
   },
   [robinhood.id]: {
@@ -207,7 +221,14 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       // window ~20x narrower than Base's, which would argue for ~2bps, but the margin also absorbs
       // oracle staleness and rounding, and 30bps of headroom costs nothing on a chain this cheap.
       // Over-reserving here loses a few bps of a bonus; under-reserving reverts the liquidation.
-      seizeCapMarginBps: 30
+      seizeCapMarginBps: 30,
+      // $0.10 against a measured cost of ~$0.04 per liquidation (200_435 gas x ~0.053 gwei at the
+      // observed basefee). Sized from a real liquidation rather than a guess: the proof liquidation on
+      // this chain cleared 0.147256 USDG, and the dust follow-up it triggered cleared 0.000449, so the
+      // floor has to sit between them. It also must stay well under the achievable bonus — a
+      // loan-as-collateral slot at 98% LLTV caps maxLif at ~1.006, so a 28-unit position can only ever
+      // yield ~0.168 — which is why this is $0.10 and not a rounder, larger number.
+      minSurplusUnits: 100_000n
     })
   }
 }
@@ -324,6 +345,8 @@ export type QuotingConfig = {
   minSurplusBps: number
   /** Lower bound (bps) on swap execution cost; skips plans whose incentive headroom cannot cover it. */
   headroomFloorBps: number
+  /** Absolute floor on a plan's surplus in loan-token units; rejects dust no rate-based gate can. */
+  minSurplusUnits: bigint
   backoffBaseBlocks: bigint
   backoffMaxBlocks: bigint
 }
@@ -780,6 +803,7 @@ export function loadConfig(
       min: 0,
       max: 10_000
     }),
+    minSurplusUnits: bigintEnv(env, 'MIN_SURPLUS_UNITS', defaults.minSurplusUnits, { min: 0n }),
     headroomFloorBps: intEnv(env, 'HEADROOM_FLOOR_BPS', DEFAULT_HEADROOM_FLOOR_BPS, {
       min: 0,
       max: 10_000
