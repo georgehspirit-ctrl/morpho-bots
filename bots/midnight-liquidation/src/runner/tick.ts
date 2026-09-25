@@ -1002,7 +1002,15 @@ export async function runTick(deps: {
           // re-simulate this position every block.
           pendingBackoff.add(label)
           pendingCooldown.add(label)
-          logger.warn('simulate.revert', { ...fields, reason: result.reason })
+          logger.warn('simulate.revert', {
+            ...fields,
+            reason: result.reason,
+            // Both are needed when `reason` is the masked "unknown reason" an empty inner revert
+            // produces through Executor._revert: `revertData` decodes the cause when there is any,
+            // and `calldata` allows replaying the exact eth_call by hand when there is not.
+            revertData: result.revertData ?? null,
+            calldata: result.calldata ?? null
+          })
           break
         default:
           assertNever(result.status)
