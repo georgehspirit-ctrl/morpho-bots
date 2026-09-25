@@ -353,6 +353,62 @@ describe('derived plan fields', () => {
   })
 })
 
+describe('dust floor (BOTS-81)', () => {
+  // The exact shape that looped on 4663: post-maturity, healthy, so only the post-maturity gate is
+  // open and its surplus is structurally positive no matter how small the position is.
+  const matured = { blockTimestamp: 3000n, maturity: 2000n, healthy: true }
+
+  it('skips a plan whose absolute surplus is under the floor, with below_dust_floor', () => {
+    const input = baseInput(matured)
+    const surplus = planSurplusOf(plan(input)!)
+    const outcome = planWithReason(input, { minSurplusUnits: surplus + 1n })
+    expect(outcome.plan).toBeNull()
+    expect(outcome.reason).toBe('below_dust_floor')
+    // Carries the same numbers the headroom skip does, so one reporting path covers both gates.
+    expect(outcome.headroom).toMatchObject({ postMaturityMode: true })
+  })
+
+  it('allows the identical plan when the floor sits at exactly its surplus', () => {
+    const input = baseInput(matured)
+    const surplus = planSurplusOf(plan(input)!)
+    // Boundary is inclusive: a plan earning exactly the floor is worth taking, and an off-by-one here
+    // would silently suppress the marginal liquidations the floor is meant to permit.
+    const outcome = planWithReason(input, { minSurplusUnits: surplus })
+    expect(outcome.reason).toBeUndefined()
+    expect(outcome.plan).not.toBeNull()
+  })
+
+  it('is disabled at a floor of 0, reproducing the ungated plan exactly', () => {
+    const input = baseInput(matured)
+    expect(planWithReason(input, { minSurplusUnits: 0n })).toEqual(planWithReason(input))
+  })
+
+  it('rejects dust that every rate-based gate lets through', () => {
+    // The regression this gate exists for. headroomBps is (lif-1)/lif, so it is identical for a dust
+    // position and a large one at the same LIF — the headroom floor cannot tell them apart, and the
+    // observed 4663 loop broadcast a 0.000449-USDG liquidation against ~200k gas because of it.
+    const dust = inputWithSlot({ amt: 3n }, { ...matured, debt: 2n, maxDebt: 1n })
+    const ungated = planWithReason(dust, { headroomFloorBps: 3 })
+    const floored = planWithReason(dust, { headroomFloorBps: 3, minSurplusUnits: 100_000n })
+    // Whatever the rate gate decides, the absolute floor must not let a dust plan through.
+    if (ungated.plan !== null) expect(planSurplusOf(ungated.plan)).toBeLessThan(100_000n)
+    expect(floored.plan).toBeNull()
+  })
+
+  it('never suppresses a bad-debt write-off, which has no surplus to clear a floor with', () => {
+    // Write-offs return before the gates. If the floor ever reached them, a position in bad debt would
+    // become permanently unrealizable — strictly worse than the dust it is meant to stop.
+    const writeOff = baseInput({
+      blockTimestamp: 3000n,
+      maturity: 2000n,
+      healthy: true,
+      badDebt: 1000n * WAD
+    })
+    const outcome = planWithReason(writeOff, { minSurplusUnits: 100_000n })
+    expect(outcome.plan).toMatchObject({ seizedAssets: 0n, repaidUnits: 0n })
+  })
+})
+
 describe('headroom floor', () => {
   // Past maturity and HEALTHY, so post-maturity mode is the only open gate and the LIF is still
   // ramping — 20s in, headroom is ~2bps against a 349bps ceiling.
