@@ -42,7 +42,8 @@ try {
       join(ROOT, 'src/index.ts'),
       join(ROOT, 'scripts/seed-liquidatable-positions.ts'),
       join(ROOT, 'scripts/seed-loan-collateral-position.ts'),
-      join(ROOT, 'scripts/rhc-create-proof-market.ts')
+      join(ROOT, 'scripts/rhc-create-proof-market.ts'),
+      join(ROOT, 'scripts/rhc-deploy-executor.ts')
     ],
     outdir: DIST_DIR,
     outbase: ROOT,
