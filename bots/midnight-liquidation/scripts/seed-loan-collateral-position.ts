@@ -555,8 +555,17 @@ async function main() {
   // before a later step failed, which is exactly what happened when the take reverted after the
   // collateral was already in. Refusing to resume there strands the collateral and demands a fresh
   // funded key for no reason, so the run continues and supplies only the shortfall.
-  const alreadyPosted =
-    before?.collaterals.find(c => c.index === slotIndex)?.amount ?? 0n
+  // `amt`, NOT `amount`. The lens field is `amt` (see LensCollateral), and reading the wrong name
+  // yielded undefined -> 0n, so a resume re-supplied the FULL collateral and doubled the position —
+  // caught only by the post-seed assertion, after the money had moved. TypeScript did not object, so
+  // the invariant below is the guard: if the position has collateral, this must see it.
+  const postedSlot = before?.collaterals.find(c => c.index === slotIndex)
+  const alreadyPosted = postedSlot?.amt ?? 0n
+  if (postedSlot && alreadyPosted === 0n) {
+    throw new Error(
+      `slot ${slotIndex} is activated but read as zero collateral — the lens field name is wrong; refusing to seed (would double the position)`
+    )
+  }
   if (before && before.hasDebt) {
     throw new Error(
       `borrower already has DEBT in this market (debt ${before.debt}, slots [${before.collaterals.map(c => c.index).join(', ')}]); use a fresh borrower key`
