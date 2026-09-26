@@ -45,6 +45,7 @@ while [ "$n" -le "$ATTEMPTS" ]; do
       --face-usdc "${PROOF_FACE_USDG:-28}" \
       --max-spend-usdc "${PROOF_MAX_SPEND_USDG:-60}" \
       --collateral-multiple-bps "${PROOF_COLLATERAL_MULTIPLE_BPS:-10500}" \
+      ${PROOF_COLLATERAL_INDEX:+--collateral-index "$PROOF_COLLATERAL_INDEX"} \
       --yes; then
     echo "SEEDED_MARKET_ID=$MARKET_ID"
     break
