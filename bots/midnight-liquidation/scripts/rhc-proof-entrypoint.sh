@@ -4,6 +4,11 @@
 # Runs as a Railway service, never locally. Exits non-zero on failure so the deployment goes red
 # rather than a half-seeded market reading as success.
 #
+# COLLATERAL MULTIPLE. 10500 (105%) leaves the position comfortably healthy, which is right when the
+# trigger is MATURITY. To prove a PRE-maturity liquidation the position has to start at the LLTV edge
+# instead: 10000 sizes collateral at exactly units/lltv, so health starts at ~1.0 and any adverse tick
+# tips it. Waiting for a 23% ETH drawdown to arrive on its own is not a test plan.
+#
 # IDEMPOTENT ON RESTART. The first version created a market unconditionally, so every crash-restart
 # minted another one — eight before it was stopped. Railway restarts on any non-zero exit, so a
 # script that mutates chain state at startup must be safe to run twice. Set PROOF_MARKET_ID to reuse
@@ -39,6 +44,7 @@ while [ "$n" -le "$ATTEMPTS" ]; do
       --markets-api "${MARKETS_API_URL:-https://api.morpho.org/v0/midnight/markets}" \
       --face-usdc "${PROOF_FACE_USDG:-28}" \
       --max-spend-usdc "${PROOF_MAX_SPEND_USDG:-60}" \
+      --collateral-multiple-bps "${PROOF_COLLATERAL_MULTIPLE_BPS:-10500}" \
       --yes; then
     echo "SEEDED_MARKET_ID=$MARKET_ID"
     break
