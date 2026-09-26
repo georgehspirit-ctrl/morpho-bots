@@ -548,10 +548,37 @@ async function main() {
   const before = (await readMidnightLiquidationLens(deploylessClient, MIDNIGHT, pairs)).get(
     lensKey(args.market, borrower.address)
   )
-  if (before && (before.hasDebt || before.collaterals.length > 0)) {
+  // A position carrying DEBT cannot be resumed — the sizing below assumes it is building one from
+  // nothing, and adding to an existing loan would mis-state both the health and the projected seize.
+  //
+  // Collateral with NO debt is different: that is this script's own supplyCollateral having landed
+  // before a later step failed, which is exactly what happened when the take reverted after the
+  // collateral was already in. Refusing to resume there strands the collateral and demands a fresh
+  // funded key for no reason, so the run continues and supplies only the shortfall.
+  const alreadyPosted =
+    before?.collaterals.find(c => c.index === slotIndex)?.amount ?? 0n
+  if (before && before.hasDebt) {
     throw new Error(
-      `borrower already has a position in this market (debt ${before.debt}, slots [${before.collaterals.map(c => c.index).join(', ')}]); use a fresh borrower key`
+      `borrower already has DEBT in this market (debt ${before.debt}, slots [${before.collaterals.map(c => c.index).join(', ')}]); use a fresh borrower key`
     )
+  }
+  const otherSlots = (before?.collaterals ?? []).filter(c => c.index !== slotIndex)
+  if (otherSlots.length > 0) {
+    throw new Error(
+      `borrower holds collateral on slot(s) [${otherSlots.map(c => c.index).join(', ')}] but this run seeds slot ${slotIndex}; use a fresh borrower key`
+    )
+  }
+  // Only the shortfall is supplied. Re-supplying the full amount on a resume would double the
+  // collateral and leave the position over-collateralised, which for an edge-of-LLTV seed means it
+  // never becomes liquidatable — the precise thing this run exists to produce.
+  const collateralToSupply = collateral > alreadyPosted ? collateral - alreadyPosted : 0n
+  if (alreadyPosted > 0n) {
+    logger.info('seed.resume', {
+      slot: slotIndex,
+      alreadyPosted: alreadyPosted.toString(),
+      stillToSupply: collateralToSupply.toString(),
+      detail: 'collateral from an earlier partial run — supplying only the shortfall'
+    })
   }
 
   process.stderr.write(
@@ -638,7 +665,9 @@ async function main() {
       args: [MIDNIGHT, collateral]
     }
   })
-  await txStep({
+  // A resume that already has the full amount posted has nothing to supply; sending a zero-value
+  // supplyCollateral would just burn gas on a no-op (or revert, depending on the contract).
+  if (collateralToSupply > 0n) await txStep({
     ctx,
     wallet: walletBorrower,
     label: 'borrower.supplyCollateral',
@@ -646,7 +675,7 @@ async function main() {
       address: MIDNIGHT,
       abi: MidnightAbi,
       functionName: 'supplyCollateral',
-      args: [market, BigInt(slotIndex), collateral, borrower.address]
+      args: [market, BigInt(slotIndex), collateralToSupply, borrower.address]
     }
   })
   await txStep({
