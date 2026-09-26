@@ -30,6 +30,7 @@ import { delay, ensureError, tryCatch } from '@repo/utils'
 import { erc20Abi } from 'viem'
 import { getBlockNumber, readContract } from 'viem/actions'
 
+import type { BorrowerCandidate } from './discovery/borrowers'
 import type { Market } from './execution/encode-call'
 import type { LiquidationPlan } from './sizing/plan'
 
@@ -38,9 +39,15 @@ import { LISTED_MARKETS_MAX_AGE_MS, TOKEN_PRICES_REFRESH_MS } from './constants'
 import {
   createApiCandidateSource,
   discoverBorrowers,
+  parseStaticCandidates,
   MAX_DISCOVERY_PAGES
 } from './discovery/borrowers'
-import { createListedMarketFilter, createUnionListedMarketFilter } from './discovery/markets'
+import { createOnchainCandidateSource } from './discovery/onchain-borrowers'
+import {
+  createListedMarketFilter,
+  createStaticListedMarketFilter,
+  createUnionListedMarketFilter
+} from './discovery/markets'
 import { createTokenPriceSource } from './discovery/token-prices'
 import { encodeLiquidationExec } from './execution/encode-call'
 import { composeQuoting } from './quotes'
@@ -143,9 +150,24 @@ async function main() {
   // startup (non-fatal — a failed first fetch leaves the set empty = fail-closed, and the timer below
   // retries), then poll on an interval.
   const listedMarkets = createUnionListedMarketFilter({
-    filters: config.markets.apiUrls.map(apiUrl =>
-      createListedMarketFilter({ apiUrl, chainId: config.chainId, logger })
-    ),
+    filters: [
+      ...config.markets.apiUrls.map(apiUrl =>
+        createListedMarketFilter({ apiUrl, chainId: config.chainId, logger })
+      ),
+      // Markets we created and underwrite ourselves, asserted in env rather than waiting on Morpho's
+      // `listed` flag. Unioned, so it widens the whitelist and never narrows what an endpoint lists.
+      // Omitted entirely when unset, because the union rejects an empty filter list and a source that
+      // lists nothing would otherwise look identical to one that is merely cold.
+      ...(config.markets.staticMarketIds.length > 0
+        ? [
+            createStaticListedMarketFilter({
+              marketIds: config.markets.staticMarketIds,
+              chainId: config.chainId,
+              logger
+            })
+          ]
+        : [])
+    ],
     chainId: config.chainId,
     maxAgeMs: LISTED_MARKETS_MAX_AGE_MS,
     logger
@@ -262,8 +284,58 @@ async function main() {
   // a longer refresh interval (or a wedged refresh loop) would otherwise leave a total liquidation halt
   // unreported for most of each interval — visible only as `discover.filtered` reading `listed: 0`,
   // which is indistinguishable from "nothing to do".
+  // Parsed once at startup: the value is static for the process lifetime, and a per-tick reparse
+  // would re-log every rejected entry on every block.
+  const staticCandidates = parseStaticCandidates(process.env.EXTRA_CANDIDATES, { logger })
+  // On-chain discovery, where the indexer does not cover the chain. This is a real source, not a
+  // hand-maintained list: it finds borrowers nobody wrote down.
+  const onchainCandidates =
+    config.discovery.onchainFromBlock === null
+      ? null
+      : createOnchainCandidateSource({
+          client,
+          midnight: config.midnight,
+          fromBlock: config.discovery.onchainFromBlock,
+          logger
+        })
+  if (onchainCandidates) {
+    logger.info('discovery.onchain_enabled', {
+      fromBlock: config.discovery.onchainFromBlock?.toString(),
+      detail: 'scanning Midnight events for (market, borrower) pairs'
+    })
+  }
+  if (staticCandidates.length > 0) {
+    logger.info('discover.static_source', {
+      pairs: staticCandidates.length,
+      detail:
+        'operator-supplied (market, borrower) pairs unioned into every pass — a coverage floor for markets Morpho does not index, NOT discovery of arbitrary borrowers'
+    })
+  }
+
   const discover = async () => {
-    const candidates = await discoverBorrowers(fetchPage, { logger, maxPages: MAX_DISCOVERY_PAGES })
+    const discovered = await discoverBorrowers(fetchPage, { logger, maxPages: MAX_DISCOVERY_PAGES })
+    // The on-chain scan must never take the tick down: a failed pass leaves its cursor unmoved and
+    // re-covers the same blocks next tick, so degrading to the other sources for one tick is safe,
+    // whereas throwing here would stop liquidating everything.
+    let onchain: BorrowerCandidate[] = []
+    if (onchainCandidates) {
+      const scanned = await tryCatch(onchainCandidates())
+      if (scanned.error) {
+        logger.warn('discover.onchain_error', { error: String(scanned.error) })
+      } else {
+        onchain = scanned.data
+      }
+    }
+    // Union, de-duplicated: the static pairs are additive coverage, so a pair the API also returns
+    // must not be evaluated twice in one pass.
+    const candidates = [...discovered]
+    const seenPairs = new Set(discovered.map(c => `${c.marketId}:${c.borrower}`))
+    for (const candidate of [...onchain, ...staticCandidates]) {
+      const key = `${candidate.marketId}:${candidate.borrower}`
+      if (seenPairs.has(key)) continue
+      seenPairs.add(key)
+      candidates.push(candidate)
+    }
     const whitelist = listedMarkets.current()
     if (whitelist.fresh === 0) {
       logger.warn('markets.whitelist_expired', {
@@ -356,6 +428,7 @@ async function main() {
       chainHead,
       caller: config.executooorAddress,
       seizeCapMarginBps: config.quoting.seizeCapMarginBps,
+      minSurplusUnits: config.quoting.minSurplusUnits,
       minSurplusBps: config.quoting.minSurplusBps,
       headroomFloorBps: config.quoting.headroomFloorBps,
       // Scoped to the lens read: viem-dlc emits per outermost request inside the scope, so a

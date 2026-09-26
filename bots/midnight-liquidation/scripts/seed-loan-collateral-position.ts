@@ -34,6 +34,7 @@ import { parseArgs } from 'node:util'
 import {
   createPublicClient,
   createWalletClient,
+  defineChain,
   erc20Abi,
   formatUnits,
   getAddress,
@@ -59,11 +60,46 @@ import { encodeRatifierData, hashOffer, isLeaf, signOfferTree, toId } from './se
 import { priceToTick, tickToPrice } from './seed/price-tick'
 import { confirmPrompt, RETRY_DELAY_MS, SIMULATE_RETRIES, txStep } from './seed/tx'
 
-const CHAIN_ID = 8453
-const MIDNIGHT = getAddress('0xAdedD8ab6dE832766Fedf0FaC4992E5C4D3EA18A')
-/** `EcrecoverRatifier` on Base — ratifies an offer against a maker's own ECDSA signature. */
-const ECRECOVER_RATIFIER = getAddress('0xd6e70365C8E8DDa9a4ca662C07bbE663b017755E')
-const USDC = getAddress('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')
+// Chain constants, overridable from env so the same script seeds any chain Midnight is deployed on.
+// The offer-tree hashing, the `toId` port and the tx retry handling below are all chain-agnostic
+// already; only these four addresses were pinned to Base. Defaults keep Base behaviour identical for
+// an existing caller that sets none of them.
+//
+// Robinhood Chain (4663):
+//   SEED_MIDNIGHT=0x6120765Ba5336150BbdDdD0Cd9108B5bFD369632
+//   SEED_RATIFIER=0x90B800999e4ACd1bD20283BD450bBd2e06D91F7C
+//   SEED_LOAN_TOKEN=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168   (USDG, also 6dp)
+const CHAIN_ID = Number(process.env.SEED_CHAIN_ID ?? 8453)
+/**
+ * The viem chain object behind every client and signer here.
+ *
+ * This has to track CHAIN_ID. viem stamps `chain.id` into the EIP-1559 signature, so leaving it
+ * pinned to `base` while CHAIN_ID said 4663 produced a correctly-built Robinhood transaction signed
+ * for Base, which the node rejected outright:
+ *   invalid chain id for signer: have 8453 want 4663
+ * Nothing else on the object is load-bearing in this script — the contract addresses all come from
+ * the SEED_* env above and the transport URL from RPC_URL — so a minimal definition is enough.
+ */
+const SEED_CHAIN =
+  CHAIN_ID === base.id
+    ? base
+    : defineChain({
+        id: CHAIN_ID,
+        name: `chain-${CHAIN_ID}`,
+        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+        rpcUrls: { default: { http: [process.env.RPC_URL ?? ''] } }
+      })
+const MIDNIGHT = getAddress(
+  process.env.SEED_MIDNIGHT ?? '0xAdedD8ab6dE832766Fedf0FaC4992E5C4D3EA18A'
+)
+/** `EcrecoverRatifier` — ratifies an offer against a maker's own ECDSA signature. Per chain. */
+const ECRECOVER_RATIFIER = getAddress(
+  process.env.SEED_RATIFIER ?? '0xd6e70365C8E8DDa9a4ca662C07bbE663b017755E'
+)
+/** The market's loan token. Named USDC for Base; USDG on Robinhood Chain, both 6 decimals. */
+const USDC = getAddress(
+  process.env.SEED_LOAN_TOKEN ?? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+)
 const PRIVATE_KEY_HEX_LENGTH = 66
 const USDC_DECIMALS = 6
 
@@ -100,6 +136,7 @@ type Args = {
   marketsApi: string
   faceUsdc: string
   collateralMultipleBps: bigint
+  collateralIndex: number | null
   priceWad: bigint
   maxSpendUsdc: string
   dryRun: boolean
@@ -127,6 +164,7 @@ function parseCliArgs(): Args {
       'markets-api': { type: 'string' },
       'face-usdc': { type: 'string', default: '0.7' },
       'collateral-multiple-bps': { type: 'string' },
+      'collateral-index': { type: 'string' },
       'price-wad': { type: 'string' },
       'max-spend-usdc': { type: 'string', default: '5' },
       'dry-run': { type: 'boolean', default: false },
@@ -160,8 +198,15 @@ function parseCliArgs(): Args {
   const priceWad = values['price-wad'] ? BigInt(values['price-wad']) : DEFAULT_PRICE_WAD
   if (priceWad <= 0n || priceWad > WAD) throw new Error('--price-wad must be in (0, 1e18]')
 
+  const collateralIndexRaw = values['collateral-index']
+  const collateralIndex = collateralIndexRaw == null ? null : Number(collateralIndexRaw)
+  if (collateralIndex != null && !Number.isInteger(collateralIndex)) {
+    throw new Error('--collateral-index must be an integer')
+  }
+
   return {
     market: market as Hex,
+    collateralIndex,
     marketsApi,
     faceUsdc: values['face-usdc'],
     collateralMultipleBps,
@@ -172,12 +217,30 @@ function parseCliArgs(): Args {
   }
 }
 
-/** The market's loan-as-collateral slot: the index whose token IS the loan token. */
-function findLoanCollateralSlot(market: Market): number {
+/**
+ * The collateral slot to seed.
+ *
+ * Defaults to the loan-as-collateral slot (token IS the loan token) when the market has one, because
+ * that is the cheapest position to build: the oracle is the identity, so no swap is needed to acquire
+ * collateral and none is needed to liquidate it. `--collateral-index` selects any other slot.
+ *
+ * That default is also a trap worth naming: a liquidation on a loan-as-collateral slot never exercises
+ * the executor's SWAP leg, so proving one proves nothing about a market whose collateral is a real
+ * asset. Pass the index explicitly to test that path.
+ */
+function selectSlot(market: Market, requested: number | null): number {
+  if (requested != null) {
+    if (requested < 0 || requested >= market.collateralParams.length) {
+      throw new Error(
+        `--collateral-index ${requested} out of range (market has ${market.collateralParams.length} slot(s))`
+      )
+    }
+    return requested
+  }
   const index = market.collateralParams.findIndex(cp => isAddressEqual(cp.token, market.loanToken))
   if (index < 0) {
     throw new Error(
-      'market has no loan-as-collateral slot (no collateral token equals the loan token)'
+      'market has no loan-as-collateral slot; pass --collateral-index to seed a real-collateral slot'
     )
   }
   return index
@@ -200,7 +263,9 @@ async function main() {
   const rpcUrl = reqEnv('RPC_URL')
   const chainIdEnv = process.env.CHAIN_ID?.trim()
   if (chainIdEnv && chainIdEnv !== String(CHAIN_ID)) {
-    throw new Error(`only Base (${CHAIN_ID}) is supported`)
+    throw new Error(
+      `CHAIN_ID=${chainIdEnv} disagrees with SEED_CHAIN_ID=${CHAIN_ID}; set them the same or neither`
+    )
   }
   const keyLender = reqKey('PRIVATE_KEY_LENDER')
   const keyBorrower = reqKey('PRIVATE_KEY_BORROWER')
@@ -208,11 +273,11 @@ async function main() {
   // viem's concrete client generics are invariant against the broad `PublicClient`/`WalletClient`
   // aliases the helpers accept, so cast once at the creation site.
   const publicClient = createPublicClient({
-    chain: base,
+    chain: SEED_CHAIN,
     transport: http(rpcUrl)
   }) as unknown as PublicClient
   const deploylessClient = createDeploylessClient({
-    chain: base,
+    chain: SEED_CHAIN,
     rpcUrl,
     rpcUrlFallback: undefined
   })
@@ -227,12 +292,12 @@ async function main() {
   }
   const walletLender = createWalletClient({
     account: lender,
-    chain: base,
+    chain: SEED_CHAIN,
     transport: http(rpcUrl)
   }) as unknown as WalletClient
   const walletBorrower = createWalletClient({
     account: borrower,
-    chain: base,
+    chain: SEED_CHAIN,
     transport: http(rpcUrl)
   }) as unknown as WalletClient
   const ctx = { publicClient, logger }
@@ -244,15 +309,28 @@ async function main() {
     dryRun: args.dryRun
   })
 
+  // The guard's intent is "would the target bot actually act on this market" — keep that, but ask
+  // the same question the bot asks. A deployment can whitelist markets from MARKET_IDS as well as
+  // from the endpoint, and on a chain where Morpho lists nothing (every market on 4663 is
+  // listed=false) the endpoint alone would refuse a market the bot is in fact configured to
+  // liquidate. Union the two, exactly as index.ts does.
+  const staticIds = (process.env.MARKET_IDS ?? '')
+    .split(',')
+    .map(part => part.trim().toLowerCase())
+    .filter(part => part.length > 0)
   const whitelist = createListedMarketFilter({
     apiUrl: args.marketsApi,
     chainId: CHAIN_ID,
     logger
   })
   await whitelist.refresh()
-  if (!whitelist.isListed(args.market)) {
+  const listedByEnv = staticIds.includes(args.market.toLowerCase())
+  if (listedByEnv) {
+    logger.info('seed.whitelisted_by_env', { market: args.market, detail: 'present in MARKET_IDS' })
+  }
+  if (!listedByEnv && !whitelist.isListed(args.market)) {
     throw new Error(
-      `market ${args.market} is not listed for chain ${CHAIN_ID} on ${whitelist.snapshot().source} — the bot would never act on it`
+      `market ${args.market} is in neither MARKET_IDS nor the listed set for chain ${CHAIN_ID} on ${whitelist.snapshot().source} — the bot would never act on it`
     )
   }
 
@@ -287,14 +365,19 @@ async function main() {
     )
   }
 
-  const slotIndex = findLoanCollateralSlot(market)
+  const slotIndex = selectSlot(market, args.collateralIndex)
   const slot = market.collateralParams[slotIndex]!
   const price = await publicClient.readContract({
     address: slot.oracle,
     abi: ORACLE_ABI,
     functionName: 'price'
   })
-  if (price !== ORACLE_PRICE_SCALE) {
+  if (price <= 0n) throw new Error(`oracle ${slot.oracle} priced ${price}; refusing to size against it`)
+  // The identity check only makes sense for a loan-as-collateral slot. On a real-collateral slot the
+  // price carries the 10^(loanDec - collDec) scaling as well as the asset price, and sizing below
+  // divides it back out rather than assuming it away.
+  const slotIsLoanCollateral = isAddressEqual(slot.token, market.loanToken)
+  if (slotIsLoanCollateral && price !== ORACLE_PRICE_SCALE) {
     throw new Error(
       `loan-collateral oracle ${slot.oracle} priced ${price}, expected the identity ${ORACLE_PRICE_SCALE}`
     )
@@ -324,11 +407,18 @@ async function main() {
   if (offerPrice > WAD) throw new Error(`tick ${tick} prices above 1 WAD`)
 
   // Sizing. `units` is the face value owed at maturity — the debt. `isHealthy` requires
-  // `collateral * price / ORACLE_PRICE_SCALE * lltv / WAD >= debt`, and price is the identity here,
-  // so the bare minimum is `units / lltv`; the multiple is rounding headroom on top.
+  //   collateral * price / ORACLE_PRICE_SCALE * lltv / WAD >= debt
+  // so, solved for collateral, the bare minimum is
+  //   debt * ORACLE_PRICE_SCALE / price * WAD / lltv
+  // and the multiple is rounding headroom on top. With a loan-as-collateral slot price IS
+  // ORACLE_PRICE_SCALE, the first factor is 1 and this reduces to the old `units / lltv` exactly.
+  //
+  // The result lands in COLLATERAL units without a decimals conversion anywhere, because the oracle
+  // price already carries 10^(loanDec - collDec) alongside the asset price. Converting decimals here
+  // as well would apply that scaling twice.
   const units = parseUnits(args.faceUsdc, USDC_DECIMALS)
   if (units <= 0n) throw new Error('--face-usdc must be positive')
-  const minCollateral = mulDivUp(units, WAD, slot.lltv)
+  const minCollateral = mulDivUp(mulDivUp(units, ORACLE_PRICE_SCALE, price), WAD, slot.lltv)
   const collateral = mulDivUp(minCollateral, args.collateralMultipleBps, BPS)
   const buyerAssets = mulDivDown(units, offerPrice, WAD)
   if (buyerAssets <= 0n) throw new Error('offer price rounds the borrower proceeds to zero')
@@ -341,10 +431,14 @@ async function main() {
   }
 
   const maxSpend = parseUnits(args.maxSpendUsdc, USDC_DECIMALS)
-  const totalUsdc = collateral + buyerAssets
-  if (totalUsdc > maxSpend) {
+  // Only meaningful as a single total when collateral and loan are the SAME token. On a real-
+  // collateral slot they are different assets with different decimals, and adding them produced a
+  // number that was not a quantity of anything — so the cap applies to the loan-token leg, and the
+  // collateral leg is bounded by the borrower actually holding it (checked below).
+  const loanSpend = slotIsLoanCollateral ? collateral + buyerAssets : buyerAssets
+  if (loanSpend > maxSpend) {
     throw new Error(
-      `plan needs ${formatUnits(totalUsdc, USDC_DECIMALS)} USDC across both wallets, over --max-spend-usdc ${args.maxSpendUsdc}`
+      `plan needs ${formatUnits(loanSpend, USDC_DECIMALS)} of the loan token, over --max-spend-usdc ${args.maxSpendUsdc}`
     )
   }
 
@@ -367,7 +461,28 @@ async function main() {
 
   // The borrower must hold collateral BEFORE the take delivers proceeds, so the lender funds it and
   // keeps `buyerAssets` back to settle its own side of the take.
-  const transferToBorrower = collateral > borrowerUsdc ? collateral - borrowerUsdc : 0n
+  // The lender can only top the borrower up out of the loan token, which covers the collateral leg
+  // only when they are the same asset. On a real-collateral slot the borrower must already hold it —
+  // funding that here would mean swapping, and a seeding tool that silently trades is a tool that
+  // can lose money in a way the operator did not ask for.
+  // A real-collateral slot is only seedable if the borrower already holds the collateral; say so in
+  // words here rather than letting supplyCollateral revert on a balance the plan never checked.
+  if (!slotIsLoanCollateral) {
+    const held = await publicClient.readContract({
+      address: slot.token,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [borrower.address]
+    })
+    if (held < collateral) {
+      throw new Error(
+        `borrower ${borrower.address} holds ${held} of collateral ${slot.token} but the plan needs ${collateral} — fund it before seeding`
+      )
+    }
+  }
+
+  const transferToBorrower =
+    slotIsLoanCollateral && collateral > borrowerUsdc ? collateral - borrowerUsdc : 0n
   if (lenderUsdc < buyerAssets + transferToBorrower) {
     throw new Error(
       `lender holds ${formatUnits(lenderUsdc, USDC_DECIMALS)} USDC but needs ${formatUnits(buyerAssets + transferToBorrower, USDC_DECIMALS)} (${formatUnits(buyerAssets, USDC_DECIMALS)} to fund the bid + ${formatUnits(transferToBorrower, USDC_DECIMALS)} to fund the borrower's collateral)`
@@ -433,10 +548,37 @@ async function main() {
   const before = (await readMidnightLiquidationLens(deploylessClient, MIDNIGHT, pairs)).get(
     lensKey(args.market, borrower.address)
   )
-  if (before && (before.hasDebt || before.collaterals.length > 0)) {
+  // A position carrying DEBT cannot be resumed — the sizing below assumes it is building one from
+  // nothing, and adding to an existing loan would mis-state both the health and the projected seize.
+  //
+  // Collateral with NO debt is different: that is this script's own supplyCollateral having landed
+  // before a later step failed, which is exactly what happened when the take reverted after the
+  // collateral was already in. Refusing to resume there strands the collateral and demands a fresh
+  // funded key for no reason, so the run continues and supplies only the shortfall.
+  const alreadyPosted =
+    before?.collaterals.find(c => c.index === slotIndex)?.amount ?? 0n
+  if (before && before.hasDebt) {
     throw new Error(
-      `borrower already has a position in this market (debt ${before.debt}, slots [${before.collaterals.map(c => c.index).join(', ')}]); use a fresh borrower key`
+      `borrower already has DEBT in this market (debt ${before.debt}, slots [${before.collaterals.map(c => c.index).join(', ')}]); use a fresh borrower key`
     )
+  }
+  const otherSlots = (before?.collaterals ?? []).filter(c => c.index !== slotIndex)
+  if (otherSlots.length > 0) {
+    throw new Error(
+      `borrower holds collateral on slot(s) [${otherSlots.map(c => c.index).join(', ')}] but this run seeds slot ${slotIndex}; use a fresh borrower key`
+    )
+  }
+  // Only the shortfall is supplied. Re-supplying the full amount on a resume would double the
+  // collateral and leave the position over-collateralised, which for an edge-of-LLTV seed means it
+  // never becomes liquidatable — the precise thing this run exists to produce.
+  const collateralToSupply = collateral > alreadyPosted ? collateral - alreadyPosted : 0n
+  if (alreadyPosted > 0n) {
+    logger.info('seed.resume', {
+      slot: slotIndex,
+      alreadyPosted: alreadyPosted.toString(),
+      stillToSupply: collateralToSupply.toString(),
+      detail: 'collateral from an earlier partial run — supplying only the shortfall'
+    })
   }
 
   process.stderr.write(
@@ -467,7 +609,7 @@ async function main() {
     logger.info('seed.dry_run_complete', { market: args.market })
     return
   }
-  if (!args.yes && !(await confirmPrompt('Proceed to send REAL transactions on Base mainnet?'))) {
+  if (!args.yes && !(await confirmPrompt(`Proceed to send REAL transactions on chain ${CHAIN_ID}?`))) {
     logger.warn('seed.declined', {})
     return
   }
@@ -514,13 +656,18 @@ async function main() {
     wallet: walletBorrower,
     label: 'borrower.approveMidnight',
     call: {
-      address: market.loanToken,
+      // The COLLATERAL token — identical to the loan token only on a loan-as-collateral slot.
+      // Approving the loan token for a WETH slot would approve an asset Midnight never pulls, and
+      // the supplyCollateral would then revert on an allowance the borrower appeared to have set.
+      address: slot.token,
       abi: erc20Abi,
       functionName: 'approve',
       args: [MIDNIGHT, collateral]
     }
   })
-  await txStep({
+  // A resume that already has the full amount posted has nothing to supply; sending a zero-value
+  // supplyCollateral would just burn gas on a no-op (or revert, depending on the contract).
+  if (collateralToSupply > 0n) await txStep({
     ctx,
     wallet: walletBorrower,
     label: 'borrower.supplyCollateral',
@@ -528,7 +675,7 @@ async function main() {
       address: MIDNIGHT,
       abi: MidnightAbi,
       functionName: 'supplyCollateral',
-      args: [market, BigInt(slotIndex), collateral, borrower.address]
+      args: [market, BigInt(slotIndex), collateralToSupply, borrower.address]
     }
   })
   await txStep({

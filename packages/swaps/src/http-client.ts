@@ -30,6 +30,9 @@ const VENUE_AUTH: Record<HttpVenue, (key: string | undefined) => Record<string, 
   lifi: (key): Record<string, string> => (key ? { 'x-lifi-api-key': key } : {}),
   // LiquidSwap (liqd.ag) is keyless — no auth header.
   liquidswap: () => ({}),
+  // Rialto propAMM (Robinhood Chain) — bearer token, same shape as 1inch. Unlike LiFi this is not
+  // optional: the API rejects an unauthenticated quote outright.
+  rialto: key => ({ Authorization: `Bearer ${key ?? ''}` }),
   // Pendle's hosted SDK is keyless — no auth header.
   pendle: () => ({})
 }

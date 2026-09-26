@@ -100,6 +100,58 @@ export async function discoverBorrowers(
   return candidates
 }
 
+/**
+ * Parses an operator-supplied list of `marketId:borrower` pairs to union into every discovery pass.
+ * Entries are separated by whitespace and/or commas; malformed entries are logged and skipped rather
+ * than failing the bot, since one typo must not take liquidation coverage to zero.
+ *
+ * WHY THIS EXISTS. {@link createApiCandidateSource} is the only borrower source, and it can only
+ * return markets Morpho indexes. Nothing on Robinhood Chain (4663) is indexed today — `markets.listed`
+ * reads 0 and the candidates endpoint returns nothing for our market ids — so discovery yields no
+ * pairs at all and no position is ever evaluated, matured or not. A bot that looks perfectly healthy
+ * (ticking every block, whitelist populated) will still never liquidate. This is the floor under that.
+ *
+ * IT IS A FLOOR, NOT DISCOVERY. It can only ever surface borrowers someone already knew to list, so
+ * it does NOT give coverage of arbitrary third-party borrowers on those markets. Treat a market whose
+ * only coverage is this list as covered for these borrowers and no others, until either Morpho indexes
+ * it or an on-chain log scan replaces this.
+ */
+export function parseStaticCandidates(
+  raw: string | undefined,
+  deps: { logger: Logger }
+): BorrowerCandidate[] {
+  const entries = (raw ?? '').split(/[\s,]+/).filter(entry => entry.length > 0)
+  const seen = new Set<string>()
+  const candidates: BorrowerCandidate[] = []
+  const rejected: string[] = []
+  for (const entry of entries) {
+    // rsplit on ':' — a market id contains no colon, so this stays correct if a future format ever
+    // prefixes the pair.
+    const split = entry.lastIndexOf(':')
+    const marketId = split === -1 ? '' : entry.slice(0, split)
+    const borrower = split === -1 ? '' : entry.slice(split + 1)
+    if (!isHex(marketId) || marketId.length !== 66 || !isAddress(borrower, { strict: false })) {
+      rejected.push(entry)
+      continue
+    }
+    const candidate: BorrowerCandidate = {
+      marketId: marketId as Hex,
+      borrower: getAddress(borrower)
+    }
+    const key = `${candidate.marketId}:${candidate.borrower}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    candidates.push(candidate)
+  }
+  if (rejected.length > 0) {
+    deps.logger.warn('discover.static_rejected', {
+      rejected,
+      detail: 'expected marketId:borrower (0x + 64 hex, 0x + 40 hex)'
+    })
+  }
+  return candidates
+}
+
 /** The `fetch` shape `openapi-fetch` calls — a single `Request`. The global `fetch` satisfies it. */
 type FetchLike = (request: Request) => Promise<Response>
 

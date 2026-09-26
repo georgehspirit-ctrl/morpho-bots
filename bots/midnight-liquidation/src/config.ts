@@ -5,8 +5,19 @@ import type { Address, Chain, Hex } from 'viem'
 import { hasBumpHeadroom } from '@repo/bot-kit'
 import { Executor } from '@repo/contracts'
 import { tryCatch } from '@repo/utils'
-import { getAddress, isAddress, isHex, parseEther, parseGwei } from 'viem'
+import { defineChain, getAddress, isAddress, isHex, parseEther, parseGwei } from 'viem'
 import { base, mainnet } from 'viem/chains'
+
+// Robinhood Chain is not in `viem/chains`. Mirrors the definition `bots/blue-liquidation` already
+// carries — that bot has run on 4663 for a while, so the chain, its gas limits and the Orbit
+// no-reorg queue handling are all proven here; only the Midnight address is new.
+const robinhood = defineChain({
+  id: 4663,
+  name: 'Robinhood',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc.mainnet.chain.robinhood.com'] } },
+  contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } }
+})
 
 import { InvalidConfigError } from './invalid-config.error'
 
@@ -16,6 +27,7 @@ import { InvalidConfigError } from './invalid-config.error'
 const ZEROX_API_KEY_ENV = 'ZEROX_API_KEY'
 const ONEINCH_API_KEY_ENV = 'ONEINCH_API_KEY'
 const LIFI_API_KEY_ENV = 'LIFI_API_KEY'
+const RIALTO_API_KEY_ENV = 'RIALTO_API_KEY'
 
 // ---------------------------------------------------------------------------
 // Per-chain Midnight deployment map
@@ -28,6 +40,10 @@ const LIFI_API_KEY_ENV = 'LIFI_API_KEY'
  */
 const BASE_BLOCK_TIME_MS = 2_000
 const MAINNET_BLOCK_TIME_MS = 12_000
+// Robinhood Chain (Arbitrum Orbit). Measured at 0.101 s over 1,000 blocks — roughly 20x faster than
+// Base and 120x mainnet, so every blocksFor() derivation lands on a much larger block count for the
+// same wall-clock intent. That is the intended behaviour and why these are durations, not literals.
+const ROBINHOOD_BLOCK_TIME_MS = 101
 
 /**
  * Converts a wall-clock intent into a block count at `blockTimeMs`, floored at one block (a target
@@ -104,6 +120,22 @@ type ChainDefaults = {
   maxGasLimit: bigint
   /** `SEIZE_CAP_MARGIN_BPS` — headroom shaved off the on-chain repay cap when sizing a seize. */
   seizeCapMarginBps: number
+  /**
+   * `MIN_SURPLUS_UNITS` — absolute floor on a plan's surplus, in LOAN-TOKEN UNITS (BOTS-81).
+   *
+   * Units, not bps, because the thing it bounds is gas — a fixed cost per liquidation, independent of
+   * position size — and every rate-based gate is scale-invariant and therefore blind to dust. The
+   * value is decimals-dependent: every loan token across these deployments is 6-decimal (USDC/USDG),
+   * so 100_000 reads as $0.10. Re-derive it before pointing this bot at an 18-decimal loan token.
+   */
+  minSurplusUnits: bigint
+  /**
+   * `DISCOVERY_FROM_BLOCK` — first block of the on-chain borrower scan; `null` runs API-only.
+   *
+   * Non-null only where Morpho does not index the chain. There the candidates endpoint returns nothing
+   * and API-only discovery finds no pairs at all, while every health signal still reads green.
+   */
+  onchainFromBlock: bigint | null
   /** `BACKOFF_BASE_BLOCKS` — first step of the per-position failure backoff. */
   backoffBaseBlocks: bigint
   /** `BACKOFF_MAX_BLOCKS` — ceiling of the per-position failure backoff. */
@@ -152,7 +184,13 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       // Clears the in-block p95 tip in ~91% of Base blocks; escalation only adds 1.42x on top.
       priorityFeeGwei: '0.1',
       maxGasLimit: 15_000_000n,
-      seizeCapMarginBps: 30
+      seizeCapMarginBps: 30,
+      // 0 preserves upstream behaviour on Base, where this gate did not exist and gas economics were
+      // never measured for it. Set it deliberately per chain rather than inheriting a guess.
+      minSurplusUnits: 0n,
+      // Morpho indexes Base, so the candidates endpoint is authoritative there and a redundant log
+      // scan would only add RPC load.
+      onchainFromBlock: null
     })
   },
   [mainnet.id]: {
@@ -173,7 +211,38 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
       // `maxBumpAttempts`), so it cannot be tightened to limit cost.
       maxGasLimit: 3_000_000n,
       // One-block oracle-drift headroom, and a mainnet block is ~6x the drift window of a Base one.
-      seizeCapMarginBps: 60
+      seizeCapMarginBps: 60,
+      // Unmeasured here too; mainnet gas would demand a far larger floor than either L2.
+      minSurplusUnits: 0n,
+      onchainFromBlock: null
+    })
+  },
+  [robinhood.id]: {
+    chain: robinhood,
+    midnight: getAddress('0x6120765Ba5336150BbdDdD0Cd9108B5bFD369632'),
+    // Orbit chain with no reorgs and a ~0.101s block, so a stuck tx is re-tried almost immediately
+    // and the ladder rarely gets past its first rung. Base's 3 is ample.
+    tuning: tuningFor(ROBINHOOD_BLOCK_TIME_MS, 3),
+    defaults: defaultsFor(ROBINHOOD_BLOCK_TIME_MS, {
+      // Measured basefee is ~0.043 gwei and there is no real tip market on this chain — an 800k-gas
+      // liquidation costs about $0.09. A tip an order of magnitude under Base's clears comfortably.
+      priorityFeeGwei: '0.01',
+      maxGasLimit: 15_000_000n,
+      // Deliberately NOT scaled down in proportion to the block time. A 0.101s block implies a drift
+      // window ~20x narrower than Base's, which would argue for ~2bps, but the margin also absorbs
+      // oracle staleness and rounding, and 30bps of headroom costs nothing on a chain this cheap.
+      // Over-reserving here loses a few bps of a bonus; under-reserving reverts the liquidation.
+      seizeCapMarginBps: 30,
+      // $0.10 against a measured cost of ~$0.04 per liquidation (200_435 gas x ~0.053 gwei at the
+      // observed basefee). Sized from a real liquidation rather than a guess: the proof liquidation on
+      // this chain cleared 0.147256 USDG, and the dust follow-up it triggered cleared 0.000449, so the
+      // floor has to sit between them. It also must stay well under the achievable bonus — a
+      // loan-as-collateral slot at 98% LLTV caps maxLif at ~1.006, so a 28-unit position can only ever
+      // yield ~0.168 — which is why this is $0.10 and not a rounder, larger number.
+      minSurplusUnits: 100_000n,
+      // Morpho indexes nothing on 4663, so this is the ONLY real borrower source on this chain.
+      // A full scan from genesis: the whole Midnight history here is three Take events.
+      onchainFromBlock: 0n
     })
   }
 }
@@ -290,6 +359,8 @@ export type QuotingConfig = {
   minSurplusBps: number
   /** Lower bound (bps) on swap execution cost; skips plans whose incentive headroom cannot cover it. */
   headroomFloorBps: number
+  /** Absolute floor on a plan's surplus in loan-token units; rejects dust no rate-based gate can. */
+  minSurplusUnits: bigint
   backoffBaseBlocks: bigint
   backoffMaxBlocks: bigint
 }
@@ -308,6 +379,15 @@ export type DiscoveryConfig = {
    * soon-to-be-liquidatable positions from the HF-triggered set.
    */
   healthFactorLte: number
+  /**
+   * First block of the on-chain borrower scan, or `null` to run API-only discovery.
+   *
+   * Set wherever Morpho does not index the chain: there the candidates endpoint returns nothing, and
+   * API-only discovery yields no pairs at all while every health signal still reads green. `0n` is a
+   * complete scan and is what Robinhood Chain uses — its entire Midnight history is a handful of
+   * events, so there is nothing to gain by starting later and a later start can only lose borrowers.
+   */
+  onchainFromBlock: bigint | null
 }
 
 /**
@@ -321,6 +401,7 @@ export type VenueConfig = {
   zeroxBaseUrl: string | undefined
   oneinchBaseUrl: string | undefined
   lifiBaseUrl: string | undefined
+  rialtoBaseUrl: string | undefined
   /** Collaterals the operator refuses to seize/hold — skipped (no quote) even in a listed market. */
   excludeCollaterals: Address[]
 }
@@ -339,6 +420,17 @@ export type MarketsConfig = {
    */
   apiUrls: string[]
   refreshMs: number
+  /**
+   * Market ids whitelisted directly from env, unioned with whatever the endpoints list.
+   *
+   * Our own markets on Robinhood Chain carry Morpho's `listed` flag as false — that flag is their
+   * app's trust layer and their call — so an endpoint-only whitelist lists nothing there and the bot
+   * idles while looking healthy. These ids are markets we created and underwrite, so the operator
+   * asserting them is the accurate source, not a remote flag we do not control.
+   *
+   * Empty by default, so existing deployments are unchanged and the whitelist stays fail-closed.
+   */
+  staticMarketIds: string[]
 }
 
 /**
@@ -512,6 +604,26 @@ function urlListEnv(env: Env, name: string, def: string[]): string[] {
 
 // Parses an optional comma-separated list of addresses into checksummed `Address`es, with `[]` as the
 // default. Fails loud on any malformed element (operator error).
+/**
+ * Comma-separated 32-byte hex ids. Mirrors {@link addressListEnv}: fail loud on a malformed entry
+ * rather than dropping it, because a silently ignored market id is a liquidation that never happens
+ * and no log line anyone reads.
+ */
+function hexListEnv(env: Env, name: string): Hex[] {
+  const raw = env[name]?.trim()
+  if (!raw) return []
+  return raw
+    .split(',')
+    .map(part => part.trim())
+    .filter(part => part.length > 0)
+    .map(part => {
+      if (!isHex(part) || part.length !== 66) {
+        throw new InvalidConfigError(`${name} contains an invalid 32-byte market id: ${part}`)
+      }
+      return part.toLowerCase() as Hex
+    })
+}
+
 function addressListEnv(env: Env, name: string): Address[] {
   const raw = env[name]?.trim()
   if (!raw) return []
@@ -645,9 +757,13 @@ export function loadConfig(
   if (enableLifi) enabledVenues.push('lifi')
   if (env[ZEROX_API_KEY_ENV]?.trim()) enabledVenues.push('0x')
   if (env[ONEINCH_API_KEY_ENV]?.trim()) enabledVenues.push('1inch')
+  // Rialto is keyed like 0x/1inch: presence of the key enables it. It is chain-scoped in practice —
+  // the propAMM only quotes Robinhood Chain — but the gate stays key-presence like every other venue
+  // rather than a chainId check, so a deployment without the key simply never selects it.
+  if (env[RIALTO_API_KEY_ENV]?.trim()) enabledVenues.push('rialto')
   if (enabledVenues.length === 0 && !allowBadDebtOnly) {
     throw new InvalidConfigError(
-      `No venues enabled (set ENABLE_LIFI=true or ${LIFI_API_KEY_ENV} / ${ZEROX_API_KEY_ENV} / ${ONEINCH_API_KEY_ENV}). Set at least one, or set ALLOW_BAD_DEBT_ONLY=true to run in bad-debt-only mode.`
+      `No venues enabled (set ENABLE_LIFI=true or ${LIFI_API_KEY_ENV} / ${ZEROX_API_KEY_ENV} / ${ONEINCH_API_KEY_ENV} / ${RIALTO_API_KEY_ENV}). Set at least one, or set ALLOW_BAD_DEBT_ONLY=true to run in bad-debt-only mode.`
     )
   }
   const zeroxBaseUrl = env.ZEROX_BASE_URL?.trim() || undefined
@@ -662,11 +778,16 @@ export function loadConfig(
   if (lifiBaseUrl && tryCatch(() => new URL(lifiBaseUrl)).error) {
     throw new InvalidConfigError(`LIFI_BASE_URL is not a valid URL: ${lifiBaseUrl}`)
   }
+  const rialtoBaseUrl = env.RIALTO_BASE_URL?.trim() || undefined
+  if (rialtoBaseUrl && tryCatch(() => new URL(rialtoBaseUrl)).error) {
+    throw new InvalidConfigError(`RIALTO_BASE_URL is not a valid URL: ${rialtoBaseUrl}`)
+  }
   const venues: VenueConfig = {
     enabled: enabledVenues,
     zeroxBaseUrl,
     oneinchBaseUrl,
     lifiBaseUrl,
+    rialtoBaseUrl,
     excludeCollaterals: addressListEnv(env, 'EXCLUDE_COLLATERALS')
   }
 
@@ -674,7 +795,8 @@ export function loadConfig(
   // to the public markets API; fail loud on any malformed entry.
   const markets: MarketsConfig = {
     apiUrls: urlListEnv(env, 'MARKETS_API_URL', DEFAULT_MARKETS_API_URLS),
-    refreshMs: intEnv(env, 'MARKETS_REFRESH_MS', DEFAULT_MARKETS_REFRESH_MS, { min: 1 })
+    refreshMs: intEnv(env, 'MARKETS_REFRESH_MS', DEFAULT_MARKETS_REFRESH_MS, { min: 1 }),
+    staticMarketIds: hexListEnv(env, 'MARKET_IDS')
   }
 
   const probe: ProbeConfig = {
@@ -704,6 +826,7 @@ export function loadConfig(
       min: 0,
       max: 10_000
     }),
+    minSurplusUnits: bigintEnv(env, 'MIN_SURPLUS_UNITS', defaults.minSurplusUnits, { min: 0n }),
     headroomFloorBps: intEnv(env, 'HEADROOM_FLOOR_BPS', DEFAULT_HEADROOM_FLOOR_BPS, {
       min: 0,
       max: 10_000
@@ -720,7 +843,11 @@ export function loadConfig(
   }
   const discovery: DiscoveryConfig = {
     apiUrl,
-    healthFactorLte: numberEnv(env, 'HEALTH_FACTOR_LTE', DEFAULT_HEALTH_FACTOR_LTE, { min: 1 })
+    healthFactorLte: numberEnv(env, 'HEALTH_FACTOR_LTE', DEFAULT_HEALTH_FACTOR_LTE, { min: 1 }),
+    onchainFromBlock:
+      env.DISCOVERY_FROM_BLOCK?.trim() === undefined || env.DISCOVERY_FROM_BLOCK?.trim() === ''
+        ? defaults.onchainFromBlock
+        : bigintEnv(env, 'DISCOVERY_FROM_BLOCK', defaults.onchainFromBlock ?? 0n, { min: 0n })
   }
 
   return {

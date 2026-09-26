@@ -1,3 +1,4 @@
+import { priceRialto, quoteRialto } from './venues/rialto'
 import type { Address } from 'viem'
 
 import { assertNever, ensureError, tryCatch } from '@repo/utils'
@@ -49,6 +50,8 @@ export async function quoteByVenue(
       return quoteLifi(client, entry, params)
     case 'liquidswap':
       return quoteLiquidSwap(client, entry, params)
+    case 'rialto':
+      return quoteRialto(client, entry, params)
     default:
       return assertNever(entry)
   }
@@ -70,6 +73,8 @@ export async function priceByVenue(
       return priceLifi(client, { baseUrl: baseUrls.lifi }, params)
     case 'liquidswap':
       return priceLiquidSwap(client, { baseUrl: baseUrls.liquidswap }, params)
+    case 'rialto':
+      return priceRialto(client, { baseUrl: baseUrls.rialto }, params)
     case 'uniswap-v3':
       throw new QuoteError('api_error', 'uniswap-v3 does not support indicative probing')
     default:
@@ -636,6 +641,8 @@ export function composeMultiVenueQuoting(deps: {
         return { venue: 'lifi', baseUrl: baseUrls.lifi }
       case 'liquidswap':
         return { venue: 'liquidswap', baseUrl: baseUrls.liquidswap }
+      case 'rialto':
+        return { venue: 'rialto', baseUrl: baseUrls.rialto }
       case 'uniswap-v3':
         throw new QuoteError('api_error', 'uniswap-v3 is not a multi-venue candidate')
       default:

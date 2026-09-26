@@ -11,6 +11,17 @@ export type SimulateResult = {
    */
   status: 'ok' | 'revert'
   reason?: string
+  /**
+   * Raw revert data, and the calldata that produced it, when the call reverted.
+   *
+   * `reason` alone is not enough to diagnose an Executor revert. `Executor._revert` bubbles an inner
+   * failure with `require(returnData.length > 0)`, so an inner call that reverts with EMPTY data makes
+   * that require revert empty in turn — viem then reports only "Execution reverted for an unknown
+   * reason." and the actual cause is unrecoverable from the log. Carrying the bytes lets the exact
+   * call be replayed and decoded by hand.
+   */
+  revertData?: string
+  calldata?: Hex
 }
 
 /**
@@ -32,9 +43,24 @@ export const simulateCall = async (
     })
   )
   if (!error) return { status: 'ok' }
+  // Walk the cause chain for the first `data` field — viem nests the revert bytes at varying depth
+  // depending on which layer classified the error. Guarded against a cyclic chain.
+  const revertData = (() => {
+    const seen = new Set<unknown>()
+    let current: unknown = error
+    while (current && !seen.has(current)) {
+      seen.add(current)
+      const data = (current as { data?: unknown }).data
+      if (typeof data === 'string' && data.startsWith('0x') && data.length > 2) return data
+      current = (current as { cause?: unknown }).cause
+    }
+    return undefined
+  })()
   return {
     status: 'revert',
-    reason: error instanceof BaseError ? error.shortMessage : error.message
+    reason: error instanceof BaseError ? error.shortMessage : error.message,
+    revertData,
+    calldata: params.data
   }
 }
 
