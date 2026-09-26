@@ -136,6 +136,7 @@ type Args = {
   marketsApi: string
   faceUsdc: string
   collateralMultipleBps: bigint
+  collateralIndex: number | null
   priceWad: bigint
   maxSpendUsdc: string
   dryRun: boolean
@@ -163,6 +164,7 @@ function parseCliArgs(): Args {
       'markets-api': { type: 'string' },
       'face-usdc': { type: 'string', default: '0.7' },
       'collateral-multiple-bps': { type: 'string' },
+      'collateral-index': { type: 'string' },
       'price-wad': { type: 'string' },
       'max-spend-usdc': { type: 'string', default: '5' },
       'dry-run': { type: 'boolean', default: false },
@@ -196,8 +198,15 @@ function parseCliArgs(): Args {
   const priceWad = values['price-wad'] ? BigInt(values['price-wad']) : DEFAULT_PRICE_WAD
   if (priceWad <= 0n || priceWad > WAD) throw new Error('--price-wad must be in (0, 1e18]')
 
+  const collateralIndexRaw = values['collateral-index']
+  const collateralIndex = collateralIndexRaw == null ? null : Number(collateralIndexRaw)
+  if (collateralIndex != null && !Number.isInteger(collateralIndex)) {
+    throw new Error('--collateral-index must be an integer')
+  }
+
   return {
     market: market as Hex,
+    collateralIndex,
     marketsApi,
     faceUsdc: values['face-usdc'],
     collateralMultipleBps,
@@ -208,12 +217,30 @@ function parseCliArgs(): Args {
   }
 }
 
-/** The market's loan-as-collateral slot: the index whose token IS the loan token. */
-function findLoanCollateralSlot(market: Market): number {
+/**
+ * The collateral slot to seed.
+ *
+ * Defaults to the loan-as-collateral slot (token IS the loan token) when the market has one, because
+ * that is the cheapest position to build: the oracle is the identity, so no swap is needed to acquire
+ * collateral and none is needed to liquidate it. `--collateral-index` selects any other slot.
+ *
+ * That default is also a trap worth naming: a liquidation on a loan-as-collateral slot never exercises
+ * the executor's SWAP leg, so proving one proves nothing about a market whose collateral is a real
+ * asset. Pass the index explicitly to test that path.
+ */
+function selectSlot(market: Market, requested: number | null): number {
+  if (requested != null) {
+    if (requested < 0 || requested >= market.collateralParams.length) {
+      throw new Error(
+        `--collateral-index ${requested} out of range (market has ${market.collateralParams.length} slot(s))`
+      )
+    }
+    return requested
+  }
   const index = market.collateralParams.findIndex(cp => isAddressEqual(cp.token, market.loanToken))
   if (index < 0) {
     throw new Error(
-      'market has no loan-as-collateral slot (no collateral token equals the loan token)'
+      'market has no loan-as-collateral slot; pass --collateral-index to seed a real-collateral slot'
     )
   }
   return index
@@ -338,14 +365,19 @@ async function main() {
     )
   }
 
-  const slotIndex = findLoanCollateralSlot(market)
+  const slotIndex = selectSlot(market, args.collateralIndex)
   const slot = market.collateralParams[slotIndex]!
   const price = await publicClient.readContract({
     address: slot.oracle,
     abi: ORACLE_ABI,
     functionName: 'price'
   })
-  if (price !== ORACLE_PRICE_SCALE) {
+  if (price <= 0n) throw new Error(`oracle ${slot.oracle} priced ${price}; refusing to size against it`)
+  // The identity check only makes sense for a loan-as-collateral slot. On a real-collateral slot the
+  // price carries the 10^(loanDec - collDec) scaling as well as the asset price, and sizing below
+  // divides it back out rather than assuming it away.
+  const slotIsLoanCollateral = isAddressEqual(slot.token, market.loanToken)
+  if (slotIsLoanCollateral && price !== ORACLE_PRICE_SCALE) {
     throw new Error(
       `loan-collateral oracle ${slot.oracle} priced ${price}, expected the identity ${ORACLE_PRICE_SCALE}`
     )
@@ -375,11 +407,18 @@ async function main() {
   if (offerPrice > WAD) throw new Error(`tick ${tick} prices above 1 WAD`)
 
   // Sizing. `units` is the face value owed at maturity — the debt. `isHealthy` requires
-  // `collateral * price / ORACLE_PRICE_SCALE * lltv / WAD >= debt`, and price is the identity here,
-  // so the bare minimum is `units / lltv`; the multiple is rounding headroom on top.
+  //   collateral * price / ORACLE_PRICE_SCALE * lltv / WAD >= debt
+  // so, solved for collateral, the bare minimum is
+  //   debt * ORACLE_PRICE_SCALE / price * WAD / lltv
+  // and the multiple is rounding headroom on top. With a loan-as-collateral slot price IS
+  // ORACLE_PRICE_SCALE, the first factor is 1 and this reduces to the old `units / lltv` exactly.
+  //
+  // The result lands in COLLATERAL units without a decimals conversion anywhere, because the oracle
+  // price already carries 10^(loanDec - collDec) alongside the asset price. Converting decimals here
+  // as well would apply that scaling twice.
   const units = parseUnits(args.faceUsdc, USDC_DECIMALS)
   if (units <= 0n) throw new Error('--face-usdc must be positive')
-  const minCollateral = mulDivUp(units, WAD, slot.lltv)
+  const minCollateral = mulDivUp(mulDivUp(units, ORACLE_PRICE_SCALE, price), WAD, slot.lltv)
   const collateral = mulDivUp(minCollateral, args.collateralMultipleBps, BPS)
   const buyerAssets = mulDivDown(units, offerPrice, WAD)
   if (buyerAssets <= 0n) throw new Error('offer price rounds the borrower proceeds to zero')
@@ -392,10 +431,14 @@ async function main() {
   }
 
   const maxSpend = parseUnits(args.maxSpendUsdc, USDC_DECIMALS)
-  const totalUsdc = collateral + buyerAssets
-  if (totalUsdc > maxSpend) {
+  // Only meaningful as a single total when collateral and loan are the SAME token. On a real-
+  // collateral slot they are different assets with different decimals, and adding them produced a
+  // number that was not a quantity of anything — so the cap applies to the loan-token leg, and the
+  // collateral leg is bounded by the borrower actually holding it (checked below).
+  const loanSpend = slotIsLoanCollateral ? collateral + buyerAssets : buyerAssets
+  if (loanSpend > maxSpend) {
     throw new Error(
-      `plan needs ${formatUnits(totalUsdc, USDC_DECIMALS)} USDC across both wallets, over --max-spend-usdc ${args.maxSpendUsdc}`
+      `plan needs ${formatUnits(loanSpend, USDC_DECIMALS)} of the loan token, over --max-spend-usdc ${args.maxSpendUsdc}`
     )
   }
 
@@ -418,7 +461,28 @@ async function main() {
 
   // The borrower must hold collateral BEFORE the take delivers proceeds, so the lender funds it and
   // keeps `buyerAssets` back to settle its own side of the take.
-  const transferToBorrower = collateral > borrowerUsdc ? collateral - borrowerUsdc : 0n
+  // The lender can only top the borrower up out of the loan token, which covers the collateral leg
+  // only when they are the same asset. On a real-collateral slot the borrower must already hold it —
+  // funding that here would mean swapping, and a seeding tool that silently trades is a tool that
+  // can lose money in a way the operator did not ask for.
+  // A real-collateral slot is only seedable if the borrower already holds the collateral; say so in
+  // words here rather than letting supplyCollateral revert on a balance the plan never checked.
+  if (!slotIsLoanCollateral) {
+    const held = await publicClient.readContract({
+      address: slot.token,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [borrower.address]
+    })
+    if (held < collateral) {
+      throw new Error(
+        `borrower ${borrower.address} holds ${held} of collateral ${slot.token} but the plan needs ${collateral} — fund it before seeding`
+      )
+    }
+  }
+
+  const transferToBorrower =
+    slotIsLoanCollateral && collateral > borrowerUsdc ? collateral - borrowerUsdc : 0n
   if (lenderUsdc < buyerAssets + transferToBorrower) {
     throw new Error(
       `lender holds ${formatUnits(lenderUsdc, USDC_DECIMALS)} USDC but needs ${formatUnits(buyerAssets + transferToBorrower, USDC_DECIMALS)} (${formatUnits(buyerAssets, USDC_DECIMALS)} to fund the bid + ${formatUnits(transferToBorrower, USDC_DECIMALS)} to fund the borrower's collateral)`
@@ -565,7 +629,10 @@ async function main() {
     wallet: walletBorrower,
     label: 'borrower.approveMidnight',
     call: {
-      address: market.loanToken,
+      // The COLLATERAL token — identical to the loan token only on a loan-as-collateral slot.
+      // Approving the loan token for a WETH slot would approve an asset Midnight never pulls, and
+      // the supplyCollateral would then revert on an allowance the borrower appeared to have set.
+      address: slot.token,
       abi: erc20Abi,
       functionName: 'approve',
       args: [MIDNIGHT, collateral]
